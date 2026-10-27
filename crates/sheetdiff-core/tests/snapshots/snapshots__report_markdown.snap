@@ -1,0 +1,47 @@
+---
+source: crates/sheetdiff-core/tests/snapshots.rs
+expression: "report::markdown(&sample())"
+---
+# Vergelijking tekeninguitgiftes
+
+- A: `A`
+- B: `B`
+- analyse: 300 dpi, tolerantie 64 grijswaarden, lijnafstand 1 px
+
+| oordeel | aantal |
+|---|---|
+| NIET VERGELIJKBAAR | 1 |
+| gewijzigd | 1 |
+| nieuw in B | 0 |
+| vervallen in B | 0 |
+| alleen verplaatst | 0 |
+| alleen printstempel | 1 |
+| gelijk | 1 |
+
+> **LET OP:** 1 blad(en) konden niet betrouwbaar vergeleken worden. Die bladen zijn NIET gecontroleerd.
+
+## Waarschuwingen
+
+- TO-100z: twee versies met ANDERE inhoud
+
+## Boekjessamenstelling
+
+- fragmenten: alleen in A [], alleen in B ["TO-523"]
+
+## Per blad
+
+### TO-213z (titel TO-213z) - **NIET VERGELIJKBAAR**
+- UITLIJNING MISLUKT: overlap 41.0 % < 60 %. Vergelijking op dit blad is niet betrouwbaar.
+
+### TO-201n (titel TO-201n) - **gewijzigd**
+- pixels: 0.0123 % (120 weg, 3400 erbij) op 300 dpi, 1 regio's (0 op printstempel)
+- tekst gewijzigd (1): `62,4 m²` -> `61,8 m²`
+- tekst toegevoegd (1): `-87`
+- printstempel: 1 regel(s)
+
+### TO-214z (titel TO-214z) - **alleen printstempel**
+- pixels: 0.0000 % (0 weg, 0 erbij) op 300 dpi, 0 regio's (0 op printstempel)
+
+### Gelijk (1)
+
+TO-215z

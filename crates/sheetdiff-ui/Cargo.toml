@@ -1,0 +1,21 @@
+[package]
+name = "sheetdiff-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sheetdiff"
+path = "src/main.rs"
+
+[dependencies]
+sheetdiff-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+image.workspace = true
+tracing.workspace = true
+eframe = { version = "0.36", features = ["persistence"] }
+egui_extras = "0.36"
+rfd = "0.17"

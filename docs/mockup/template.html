@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sheetdiff - mockup</title>
+<style>
+/* KBA app-thema (bron: KBA-huisstijl, kba-app-theme.css) */
+:root{
+  --theme-bg:#FFFFFF; --theme-bg-lighter:#E7F2EF; --theme-docbar-bg:#DCEBE7; --theme-border:#DFE7E4;
+  --theme-text:#0F302C; --theme-text-secondary:rgba(15,48,44,.72); --theme-text-muted:#6B7975;
+  --theme-accent:#0FA08D; --theme-accent-hover:#0D6862; --theme-hover:rgba(176,234,226,.40);
+  --theme-hover-strong:rgba(176,234,226,.60); --theme-danger-color:#A6342B; --theme-warning:#8F6A1F;
+  --theme-status-bg:#0D6862; --theme-status-text:#D8EEE9; --theme-sidebar-bg:#F4F8F7;
+  --theme-sidebar-active-bg:rgba(176,234,226,.50); --theme-sidebar-active-text:#0D6862;
+  --theme-panel-header-bg:#F4F8F7; --theme-panel-header-text:#0D6862; --petrol:#0D6862; --mint:#B0EAE2;
+  --c-removed:#DC1E1E; --c-added:#00AAC8;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;font-family:'Segoe UI',Arial,sans-serif;color:var(--theme-text);background:var(--theme-bg);font-size:13px}
+.shell{display:grid;grid-template-rows:38px 36px 1fr 26px;height:100vh}
+.titlebar{background:var(--theme-bg-lighter);display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--theme-border)}
+.titlebar .logo{width:26px;height:20px}
+.titlebar h1{font-size:14px;margin:0;letter-spacing:-.02em;color:var(--petrol)}
+.titlebar .doc{color:var(--theme-text-muted);margin-left:8px}
+.titlebar .mock{margin-left:auto;font-size:11px;color:var(--theme-warning);border:1px solid var(--theme-warning);padding:2px 8px;border-radius:10px}
+.tabs{background:var(--theme-bg-lighter);display:flex;gap:2px;padding:0 8px;border-bottom:1px solid var(--theme-border)}
+.tabs button{border:0;background:transparent;padding:8px 14px;font:inherit;color:var(--theme-text-secondary);cursor:pointer;border-bottom:2px solid transparent}
+.tabs button:hover{background:var(--theme-hover)}
+.tabs button.on{background:var(--theme-bg);color:var(--petrol);border-bottom-color:var(--theme-accent);font-weight:600}
+.main{display:grid;grid-template-columns:250px 1fr auto;min-height:0}
+.left{background:var(--theme-sidebar-bg);border-right:1px solid var(--theme-border);overflow:auto}
+.left h3,.panel h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--theme-panel-header-text);margin:12px 12px 6px}
+.tree .it{display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;border-left:3px solid transparent}
+.tree .it:hover{background:var(--theme-hover)}
+.tree .it.on{background:var(--theme-sidebar-active-bg);border-left-color:var(--theme-accent);color:var(--theme-sidebar-active-text);font-weight:600}
+.tree .grp{padding:6px 12px 2px;color:var(--theme-text-muted);font-size:11px}
+.chip{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;white-space:nowrap;border:1px solid transparent}
+.v-chg{background:#FCE9E7;color:var(--theme-danger-color);border-color:#F1C9C5}
+.v-stamp{background:#F4F8F7;color:var(--theme-text-muted);border-color:var(--theme-border)}
+.v-eq{background:#E8F6F3;color:var(--petrol);border-color:#C4E8E1}
+.v-nc{background:#8F6A1F;color:#fff}
+.v-new{background:#E6F6FA;color:#007C93;border-color:#BFE6EF}
+.p-ok{background:#E8F6F3;color:var(--petrol);border-color:#C4E8E1}
+.p-no{background:#FCE9E7;color:var(--theme-danger-color);border-color:#F1C9C5}
+.p-q{background:#F6EFDF;color:var(--theme-warning);border-color:#E8D8B4}
+.content{min-width:0;min-height:0;overflow:auto;position:relative}
+.panel{width:340px;border-left:1px solid var(--theme-border);overflow:auto;background:#fff}
+.panel.hide{display:none}
+.panel .hd{background:var(--theme-panel-header-bg);padding:8px 12px;font-weight:600;color:var(--theme-panel-header-text);border-bottom:1px solid var(--theme-border);display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:2}
+.status{background:var(--theme-status-bg);color:var(--theme-status-text);display:flex;align-items:center;gap:18px;padding:0 12px;font-size:11.5px}
+.status b{color:#fff;font-weight:600}
+.screen{display:none;height:100%}
+.screen.on{display:block}
+.pad{padding:18px 22px;max-width:1200px}
+h2{font-size:20px;letter-spacing:-.02em;margin:0 0 4px;color:var(--petrol)}
+.sub{color:var(--theme-text-muted);margin-bottom:16px}
+.pick{display:grid;grid-template-columns:150px 1fr auto;gap:8px 10px;align-items:center;margin-bottom:16px;max-width:1000px}
+.pick input{font:inherit;padding:6px 8px;border:1px solid var(--theme-border);border-radius:4px;background:rgba(15,160,141,.05);color:var(--theme-text)}
+.btn{font:inherit;border:1px solid var(--theme-border);background:#fff;padding:5px 12px;border-radius:4px;cursor:pointer;color:var(--theme-text)}
+.btn:hover{background:var(--theme-hover);border-color:var(--theme-accent)}
+.btn.primary{background:var(--petrol);color:#fff;border-color:var(--petrol)}
+.btn.primary:hover{background:#0A524D}
+.btn.on{background:var(--theme-sidebar-active-bg);border-color:var(--theme-accent);color:var(--petrol);font-weight:600}
+table{border-collapse:collapse;width:100%}
+th{text-align:left;font-weight:600;color:var(--theme-text-secondary);font-size:11.5px;border-bottom:2px solid var(--theme-border);padding:6px 8px;background:var(--theme-sidebar-bg);position:sticky;top:0}
+td{border-bottom:1px solid var(--theme-border);padding:6px 8px;vertical-align:top}
+tr.row:hover td{background:var(--theme-hover);cursor:pointer}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.note{background:var(--theme-sidebar-bg);border-left:3px solid var(--theme-accent);padding:8px 12px;margin:10px 0;color:var(--theme-text-secondary)}
+.warn{border-left-color:var(--theme-warning)}
+.toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--theme-border);background:#fff;position:sticky;top:0;z-index:3}
+.toolbar .sep{width:1px;height:22px;background:var(--theme-border);margin:0 4px}
+.toolbar label{color:var(--theme-text-secondary);font-size:12px;display:flex;align-items:center;gap:6px}
+.viewer{position:absolute;inset:45px 0 0 0;overflow:hidden;background:#EEF3F1;cursor:grab}
+.viewer.drag{cursor:grabbing}
+.pane{position:absolute;top:0;bottom:0;overflow:hidden}
+.pane .lbl{position:absolute;left:8px;top:8px;z-index:2;background:rgba(255,255,255,.9);border:1px solid var(--theme-border);padding:2px 8px;border-radius:3px;font-size:11px}
+.stage{position:absolute;left:0;top:0;transform-origin:0 0}
+.stage canvas,.stage img{display:block;image-rendering:auto}
+.stage svg{position:absolute;left:0;top:0;overflow:visible}
+.diffitem{padding:8px 12px;border-bottom:1px solid var(--theme-border);cursor:pointer}
+.diffitem:hover{background:var(--theme-hover)}
+.diffitem.on{background:var(--theme-sidebar-active-bg);box-shadow:inset 3px 0 0 var(--theme-accent)}
+.diffitem .t{font-size:12px;margin-top:3px}
+.old{color:var(--c-removed);text-decoration:line-through}
+.new{color:#007C93}
+.src{font-size:10px;color:var(--theme-text-muted);border:1px solid var(--theme-border);border-radius:3px;padding:0 4px;margin-left:4px}
+.legend{display:flex;gap:12px;font-size:11.5px;color:var(--theme-text-secondary)}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-2px;margin-right:4px}
+.quad{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:12px}
+.quad figure{margin:0;border:1px solid var(--theme-border);background:#fff;position:relative}
+.quad figcaption{font-size:11px;padding:4px 8px;background:var(--theme-sidebar-bg);border-bottom:1px solid var(--theme-border);color:var(--theme-text-secondary)}
+.quad img{width:100%;display:block}
+.quad svg{position:absolute;left:0;top:23px;width:100%;pointer-events:none}
+.cm{padding:10px 12px;border-bottom:1px solid var(--theme-border);cursor:pointer}
+.cm:hover{background:var(--theme-hover)}
+.cm.on{background:var(--theme-sidebar-active-bg);box-shadow:inset 3px 0 0 var(--theme-accent)}
+.cm .meta{font-size:11px;color:var(--theme-text-muted);margin-top:4px}
+.cm select,.cm textarea{font:inherit;font-size:12px;border:1px solid var(--theme-border);border-radius:3px;padding:3px}
+.cm textarea{width:100%;height:38px;margin-top:6px;resize:vertical}
+.kbd{font-family:Consolas,monospace;font-size:11px;border:1px solid var(--theme-border);border-bottom-width:2px;border-radius:3px;padding:0 4px;background:#fff}
+.thumb{position:fixed;pointer-events:none;border:1px solid var(--theme-border);box-shadow:0 8px 24px rgba(15,48,44,.14);background:#fff;display:none;z-index:50}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.card{border:1px solid var(--theme-border);border-radius:4px;padding:12px 14px}
+.card h4{margin:0 0 8px;color:var(--petrol);font-size:13px}
+.method{display:inline-flex;gap:3px}
+.method span{font-size:10px;border-radius:3px;padding:0 5px;border:1px solid var(--theme-border)}
+.method .y{background:#E8F6F3;color:var(--petrol);border-color:#C4E8E1}
+.method .n{color:#B6C2BF}
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="titlebar">
+    <img class="logo" alt="" src="__LOGO__">
+    <h1>sheetdiff</h1><span class="doc">Referentieproject - uitgifte A &rarr; B</span>
+    <span class="mock">MOCKUP - klikbaar, niet werkend. Beelden en cijfers zijn echt (berekend door de spike).</span>
+  </div>
+  <div class="tabs" id="tabs">
+    <button data-s="start" class="on">a. Start</button>
+    <button data-s="view">b. Bladweergave</button>
+    <button data-s="diffs">c. Verschillen</button>
+    <button data-s="comments">d. Opmerkingen</button>
+    <button data-s="export">e. Export</button>
+  </div>
+  <div class="main">
+    <div class="left">
+      <h3>Uitgifte</h3>
+      <div class="tree" id="tree"></div>
+    </div>
+    <div class="content" id="content">
+
+      <!-- a. START -->
+      <section class="screen on" id="s-start"><div class="pad">
+        <h2>Uitgiftes vergelijken</h2>
+        <div class="sub">Kies twee uitgiftes (map met boekjes of losse PDF) en optioneel de PDF met opmerkingen van de aannemer.</div>
+        <div class="pick">
+          <b>Uitgifte A (oud)</b><input value="__PATH_A__"><button class="btn">Bladeren...</button>
+          <b>Uitgifte B (nieuw)</b><input value="__PATH_B__"><button class="btn">Bladeren...</button>
+          <b>Opmerkingen (optioneel)</b><input value="__PATH_C__"><button class="btn">Bladeren...</button>
+          <span></span><div><button class="btn primary">Vergelijken</button> <span style="color:var(--theme-text-muted);margin-left:8px">300 dpi, tolerantie 64, lijnafstand 1 px - <a href="#" style="color:var(--theme-accent)">instellingen</a></span></div><span></span>
+        </div>
+        <div class="note">Vergelijkt op <b>tekeningnummer</b> (uit de titelhoek), niet op paginavolgorde of boekje. Een blad dat in meerdere boekjes zit wordt een keer vergeleken. Een blad dat niet betrouwbaar uit te lijnen is krijgt <span class="chip v-nc">NIET VERGELIJKBAAR</span> en telt nooit als gelijk.</div>
+        <table id="sheettable"><thead><tr>
+          <th>Blad</th><th>Oordeel</th><th class="num">Pixels</th><th class="num">Regio's</th><th>Tekst (gew / + / - / verpl)</th><th>Gevonden door</th><th>Uitlijning B op A</th><th class="num">Opm.</th><th class="num">Tijd</th>
+        </tr></thead><tbody></tbody></table>
+        <div class="note warn">Gemeten in de spike: <b>TO-202n</b> en <b>TO-213z</b> hebben een verschoven tekening binnen een vast kader (0,34 mm resp. 5 mm). De uitlijning legt dan de tekening goed, het kader niet. In de app: uitlijning per viewport, met handmatig bijstellen.</div>
+      </div></section>
+
+      <!-- b. BLADWEERGAVE -->
+      <section class="screen" id="s-view">
+        <div class="toolbar">
+          <b id="vtitle" style="color:var(--petrol)">TO-201n</b><span class="sep"></span>
+          <button class="btn mode on" data-m="overlay">Overlay</button>
+          <button class="btn mode" data-m="blink">Knipperen <span class="kbd">spatie</span></button>
+          <button class="btn mode" data-m="side">Naast elkaar</button>
+          <button class="btn mode" data-m="pixel">Pixelverschil</button>
+          <button class="btn mode" data-m="vector">Vectorverschil</button>
+          <span class="sep"></span>
+          <label id="lblmix">A <input type="range" id="mix" min="0" max="100" value="50"> B</label>
+          <label><input type="checkbox" id="showregions" checked> regio's</label>
+          <label><input type="checkbox" id="showcomments" checked> opmerkingen</label>
+          <span class="sep"></span>
+          <button class="btn" id="zfit">Passend</button><button class="btn" id="z11">1:1 pixel</button>
+          <span class="legend" style="margin-left:8px"><span><i style="background:var(--c-removed)"></i>alleen A (weg)</span><span><i style="background:var(--c-added)"></i>alleen B (nieuw)</span><span><i style="background:#555"></i>gelijk</span></span>
+        </div>
+        <div class="viewer" id="viewer"></div>
+      </section>
+
+      <!-- c. VERSCHILLEN -->
+      <section class="screen" id="s-diffs"><div class="pad">
+        <h2>Verschillenlijst - <span id="dtitle">TO-201n</span></h2>
+        <div class="sub">Elke regio is een navigatiepunt; de weergave blijft de pixel. <span class="kbd">N</span> / <span class="kbd">P</span> = volgende / vorige, klik = zoom in bladweergave.</div>
+        <table id="difftable"><thead><tr><th>#</th><th>Plek (mm)</th><th>Gevonden door</th><th class="num">weg px</th><th class="num">nieuw px</th><th>Tekst oud &rarr; nieuw</th></tr></thead><tbody></tbody></table>
+      </div></section>
+
+      <!-- d. OPMERKINGEN -->
+      <section class="screen" id="s-comments">
+        <div class="pad" style="padding-bottom:0"><h2>Opmerkingen aannemer</h2>
+        <div class="sub">Opmerkingen van de aannemer op uitgifte A. Elke opmerking is uitgelijnd op A en op B; het voorstel komt uit het verschil A&rarr;B in de opmerkingszone. <b>Het is een voorstel, geen oordeel</b> - de status zet je zelf.</div></div>
+        <div id="cmdetail"></div>
+      </section>
+
+      <!-- e. EXPORT -->
+      <section class="screen" id="s-export"><div class="pad">
+        <h2>Export</h2>
+        <div class="grid2">
+          <div class="card"><h4>Verschillen</h4>
+            <label><input type="checkbox" checked> Rapport (markdown/PDF)</label><br>
+            <label><input type="checkbox" checked> Lijst per blad (xlsx + csv)</label><br>
+            <label><input type="checkbox"> Revisiewolken als annotatie op kopie van B (verwijderbaar in Bluebeam)</label><br><br>
+            <button class="btn primary">Exporteren</button></div>
+          <div class="card"><h4>Opmerkingen</h4>
+            <label><input type="checkbox" checked> Opmerkingenlijst (xlsx + csv)</label><br>
+            <label><input type="checkbox" checked> PDF van B met opmerkingen en status erop</label><br>
+            <label><input type="checkbox" checked> Status opslaan naast de PDF's (<code>uitgifte.sheetdiff.json</code>) - later verder</label><br><br>
+            <button class="btn primary">Exporteren</button></div>
+        </div>
+        <h3 style="color:var(--petrol);font-size:13px;margin-top:20px">Voorbeeld opmerkingenlijst (xlsx)</h3>
+        <table id="exporttable"><thead><tr><th>Nr</th><th>Blad</th><th>Tekst aannemer</th><th>Voorstel</th><th>Status Jochem</th><th>Notitie</th></tr></thead><tbody></tbody></table>
+      </div></section>
+    </div>
+    <div class="panel" id="panel"></div>
+  </div>
+  <div class="status" id="status"></div>
+</div>
+<div class="thumb" id="thumb"></div>
+
+<script>
+const DATA = __DATA__;
+const IMG = __IMG__;
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const vclass = v => ({Changed:'v-chg',StampOnly:'v-stamp',Identical:'v-eq',NotComparable:'v-nc',AddedInB:'v-new',RemovedFromB:'v-new'}[v]);
+const vlabel = v => ({Changed:'gewijzigd',StampOnly:'alleen printstempel',Identical:'gelijk',NotComparable:'NIET VERGELIJKBAAR',AddedInB:'nieuw in B',RemovedFromB:'vervallen in B'}[v]);
+const pclass = p => p.startsWith('WAARSCH') ? 'p-ok' : p.startsWith('NIET') ? 'p-no' : 'p-q';
+const MM = 25.4/72;
+const HERO = DATA.hero;
+let screen = 'start', mode = 'overlay', curDiff = -1, curComment = null;
+const status = {}; // comment id -> {s, n}
+DATA.comments.forEach(c => status[c.id] = {s: c.jochem ? 'verwerkt' : '', n: c.jochem ? 'afgevinkt in PDF (Ink, Jochem 20-06)' : ''});
+
+// ---------- linkerpaneel ----------
+function renderTree(){
+  const t = $('#tree'); t.innerHTML = '';
+  const grp = document.createElement('div'); grp.className='grp'; grp.textContent='TO+_wijzA_gevels (11 bladen)'; t.appendChild(grp);
+  DATA.sheets.forEach(s => {
+    const d = document.createElement('div'); d.className = 'it' + (s.key===HERO && screen!=='start' ? ' on':'');
+    const nc = DATA.comments.filter(c => c.sheet===s.key).length;
+    d.innerHTML = `<span style="min-width:62px">${s.key}</span><span class="chip ${vclass(s.verdict)}">${vlabel(s.verdict)}</span>${nc?`<span class="src">${nc} opm</span>`:''}`;
+    d.onclick = () => { if (s.key===HERO) go('view'); else alert('In de mockup is alleen ' + HERO + ' volledig uitgewerkt.'); };
+    d.onmouseenter = e => showThumb(s.key, e); d.onmousemove = e => moveThumb(e); d.onmouseleave = hideThumb;
+    t.appendChild(d);
+  });
+  const g2 = document.createElement('div'); g2.className='grp'; g2.style.marginTop='10px'; g2.textContent='Opmerkingen'; t.appendChild(g2);
+  const d = document.createElement('div'); d.className='it' + (screen==='comments'?' on':''); d.innerHTML = `Aannemer <span class="src">${DATA.comments.length}</span>`; d.onclick=()=>go('comments'); t.appendChild(d);
+}
+function showThumb(k, e){ const src = IMG[k+'_diff']; if(!src) return; const th=$('#thumb'); th.innerHTML=`<img src="${src}" style="width:420px;display:block">`; th.style.display='block'; moveThumb(e); }
+function moveThumb(e){ const th=$('#thumb'); th.style.left=(e.clientX+18)+'px'; th.style.top=Math.min(e.clientY-40, innerHeight-320)+'px'; }
+function hideThumb(){ $('#thumb').style.display='none'; }
+
+// ---------- start: bladenlijst ----------
+function methodCell(s){
+  const r = s.regions.filter(r=>!r.stamp).length>0, v = s.text.some(t=>t.kind!=='Stamp');
+  return `<span class="method"><span class="${r?'y':'n'}">raster</span><span class="${v?'y':'n'}">vector</span></span>`;
+}
+function renderSheetTable(){
+  const tb = $('#sheettable tbody'); tb.innerHTML='';
+  DATA.sheets.forEach(s => {
+    const n = k => s.text.filter(t=>t.kind===k).length;
+    const nc = DATA.comments.filter(c => c.sheet===s.key).length;
+    const tr = document.createElement('tr'); tr.className='row';
+    const reg = s.registration ? s.registration.note.replace('identiteit (zelfde formaat, geen verschuiving)','identiek') : '';
+    tr.innerHTML = `<td><b>${s.key}</b></td><td><span class="chip ${vclass(s.verdict)}">${vlabel(s.verdict)}</span></td>
+      <td class="num">${s.pixel_pct.toFixed(3).replace('.',',')} %</td><td class="num">${s.regions.filter(r=>!r.stamp).length}</td>
+      <td>${n('Changed')} / ${n('Added')} / ${n('Removed')} / ${n('Moved')}</td><td>${methodCell(s)}</td>
+      <td style="color:${reg==='identiek'?'var(--theme-text-muted)':'var(--theme-warning)'}">${reg}</td><td class="num">${nc||''}</td><td class="num">${s.seconds.toFixed(1)} s</td>`;
+    tr.onclick = () => { if (s.key===HERO) go('view'); else alert('In de mockup is alleen ' + HERO + ' volledig uitgewerkt.'); };
+    tr.onmouseenter = e => showThumb(s.key, e); tr.onmousemove = moveThumb; tr.onmouseleave = hideThumb;
+    tb.appendChild(tr);
+  });
+}
+
+// ---------- viewer ----------
+const hero = DATA.sheets.find(s => s.key===HERO);
+const view = {z: 0.4, x: 20, y: 20};
+let imgA, imgB, imgD, blendCanvas, blinkOn = false, blinkTimer = null;
+function loadImg(src){ return new Promise(r => { const i = new Image(); i.onload = () => r(i); i.src = src; }); }
+async function initViewer(){
+  [imgA, imgB, imgD] = await Promise.all([loadImg(IMG[HERO+'_a']), loadImg(IMG[HERO+'_b']), loadImg(IMG[HERO+'_diff'])]);
+  blendCanvas = document.createElement('canvas'); blendCanvas.width = imgA.width; blendCanvas.height = imgA.height;
+  const ca = document.createElement('canvas'); ca.width=imgA.width; ca.height=imgA.height; const xa=ca.getContext('2d'); xa.drawImage(imgA,0,0);
+  const cb = document.createElement('canvas'); cb.width=imgB.width; cb.height=imgB.height; const xb=cb.getContext('2d'); xb.drawImage(imgB,0,0);
+  window._pa = xa.getImageData(0,0,ca.width,ca.height).data; window._pb = xb.getImageData(0,0,cb.width,cb.height).data;
+  fit(); renderView();
+}
+function blend(){
+  const mix = $('#mix').value/100, w = blendCanvas.width, h = blendCanvas.height;
+  const ctx = blendCanvas.getContext('2d'), out = ctx.createImageData(w,h), o = out.data, pa = window._pa, pb = window._pb;
+  const RA=[220,30,30], RB=[0,170,200];
+  for (let i=0;i<o.length;i+=4){
+    const ta=(255-pa[i])/255*Math.min(1,2*(1-mix)), tb=(255-pb[i])/255*Math.min(1,2*mix);
+    for (let k=0;k<3;k++){ const a=255-ta*(255-RA[k]), b=255-tb*(255-RB[k]); o[i+k]=a*b/255; }
+    o[i+3]=255;
+  }
+  ctx.putImageData(out,0,0);
+}
+function overlaySvg(w,h){
+  const s = 1; // 72 dpi: 1 pt = 1 px
+  let g = '';
+  if ($('#showregions').checked){
+    hero.regions.forEach((r,i) => { const b=r.bbox; const on = i===curDiff;
+      g += `<rect x="${b.x0-4}" y="${b.y0-4}" width="${b.x1-b.x0+8}" height="${b.y1-b.y0+8}" fill="none" stroke="${r.stamp?'#9AA5A2':'#0FA08D'}" stroke-width="${on?3:1.4}" stroke-dasharray="${r.stamp?'4 3':''}" vector-effect="non-scaling-stroke"/>`;
+    });
+  }
+  if (mode==='vector'){
+    hero.text.forEach(t => { if (t.kind==='Stamp') return; const b=t.bbox;
+      const col = t.kind==='Removed' ? '#DC1E1E' : t.kind==='Added' ? '#00AAC8' : t.kind==='Moved' ? '#8F6A1F' : '#0D6862';
+      g += `<rect x="${b.x0-1}" y="${b.y0-1}" width="${b.x1-b.x0+2}" height="${b.y1-b.y0+2}" fill="${col}" fill-opacity=".12" stroke="${col}" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`;
+      const lab = t.kind==='Changed' ? `${t.old} → ${t.new}` : t.kind==='Added' ? `+ ${t.new}` : t.kind==='Removed' ? `− ${t.old}` : `⇢ ${t.old}`;
+      g += `<text x="${b.x0}" y="${b.y0-3}" font-size="7" font-family="Segoe UI" fill="${col}">${lab.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</text>`;
+    });
+  }
+  if ($('#showcomments').checked){
+    DATA.comments.filter(c => c.sheet===HERO && c.zone_mm).forEach(c => {
+      const x = c.zone_mm[0]/MM, y = c.zone_mm[1]/MM;
+      g += `<g><circle cx="${x}" cy="${y}" r="9" fill="#8F6A1F"/><text x="${x}" y="${y+3.5}" font-size="10" text-anchor="middle" fill="#fff" font-family="Segoe UI" font-weight="600">${c.id}</text></g>`;
+    });
+  }
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">${g}</svg>`;
+}
+function stageHtml(src){ return `<div class="stage" style="transform:translate(${view.x}px,${view.y}px) scale(${view.z})"><img src="${src}" width="${imgA.width}" height="${imgA.height}" draggable="false">${overlaySvg(imgA.width,imgA.height)}</div>`; }
+function renderView(){
+  if (!imgA) return;
+  const v = $('#viewer'); $('#lblmix').style.display = (mode==='overlay') ? '' : 'none';
+  clearInterval(blinkTimer); blinkTimer=null;
+  if (mode==='side'){
+    const half = v.clientWidth/2;
+    v.innerHTML = `<div class="pane" style="left:0;width:${half-1}px"><span class="lbl">A - 15-06-2026</span>${stageHtml(IMG[HERO+'_a'])}</div><div class="pane" style="left:${half+1}px;right:0;border-left:2px solid var(--theme-border)"><span class="lbl">B - 24-06-2026 (uitgelijnd)</span>${stageHtml(IMG[HERO+'_b'])}</div>`;
+  } else if (mode==='overlay'){
+    blend();
+    v.innerHTML = `<div class="pane" style="left:0;right:0"><span class="lbl">Overlay: A rood, B cyaan, gelijk donker - schuif voor dekking</span>${stageHtml(blendCanvas.toDataURL())}</div>`;
+  } else if (mode==='blink'){
+    v.innerHTML = `<div class="pane" style="left:0;right:0"><span class="lbl" id="blbl">A</span>${stageHtml(IMG[HERO+'_a'])}</div>`;
+    blinkTimer = setInterval(toggleBlink, 650);
+  } else if (mode==='pixel'){
+    v.innerHTML = `<div class="pane" style="left:0;right:0"><span class="lbl">Pixelverschil per pixel (300 dpi analyse, hier 72 dpi weergave): rood = alleen A, cyaan = alleen B</span>${stageHtml(IMG[HERO+'_diff'])}</div>`;
+  } else if (mode==='vector'){
+    v.innerHTML = `<div class="pane" style="left:0;right:0"><span class="lbl">Vectorverschil (tekstobjecten met bbox uit de PDF; scherp op elke zoom). Paden: in spike - lijnen/bogen/arceringen met tolerantie in mm.</span>${stageHtml(IMG[HERO+'_diff'])}</div>`;
+    $$('.stage img').forEach(i => i.style.opacity = .35);
+  }
+}
+function toggleBlink(){ blinkOn=!blinkOn; const i=$('.stage img'); if(!i) return; i.src = IMG[HERO+(blinkOn?'_b':'_a')]; const l=$('#blbl'); if(l) l.textContent = blinkOn?'B':'A'; }
+function applyTransform(){ $$('.stage').forEach(s => s.style.transform = `translate(${view.x}px,${view.y}px) scale(${view.z})`); $('#status-zoom').textContent = (view.z*72).toFixed(0)+' dpi'+(view.z>=300/72?' (in de app: herrenderd tot 1:1)':''); }
+function fit(){ const v=$('#viewer'); const w = mode==='side'? v.clientWidth/2 : v.clientWidth; view.z = Math.min(w/imgA.width, v.clientHeight/imgA.height)*0.96; view.x = 10; view.y = 10; }
+function zoomTo(b, pad=40){ const v=$('#viewer'); const w = mode==='side'? v.clientWidth/2 : v.clientWidth;
+  const bw=b.x1-b.x0+2*pad, bh=b.y1-b.y0+2*pad; view.z=Math.min(8, w/bw, v.clientHeight/bh); view.x = w/2 - (b.x0+b.x1)/2*view.z; view.y = v.clientHeight/2 - (b.y0+b.y1)/2*view.z; }
+(function viewerEvents(){
+  const v = $('#viewer'); let drag=null;
+  v.addEventListener('wheel', e => { e.preventDefault(); const r=v.getBoundingClientRect(); let mx=e.clientX-r.left, my=e.clientY-r.top;
+    if (mode==='side' && mx > v.clientWidth/2) mx -= v.clientWidth/2;
+    const f = Math.exp(-e.deltaY*0.0015), nz=Math.min(20,Math.max(0.05,view.z*f)); view.x = mx-(mx-view.x)*nz/view.z; view.y = my-(my-view.y)*nz/view.z; view.z=nz; applyTransform(); }, {passive:false});
+  v.addEventListener('mousedown', e => { drag={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y}; v.classList.add('drag'); });
+  addEventListener('mousemove', e => { if(!drag) return; view.x = drag.vx + e.clientX-drag.x; view.y = drag.vy + e.clientY-drag.y; applyTransform(); });
+  addEventListener('mouseup', () => { drag=null; v.classList.remove('drag'); });
+})();
+$$('.mode').forEach(b => b.onclick = () => { $$('.mode').forEach(x=>x.classList.remove('on')); b.classList.add('on'); mode=b.dataset.m; renderView(); renderPanel(); });
+$('#mix').oninput = () => { if (mode==='overlay') renderView(); };
+$('#showregions').onchange = renderView; $('#showcomments').onchange = renderView;
+$('#zfit').onclick = () => { fit(); applyTransform(); };
+$('#z11').onclick = () => { const v=$('#viewer'); const cx=(v.clientWidth/2-view.x)/view.z, cy=(v.clientHeight/2-view.y)/view.z; view.z=300/72; view.x=v.clientWidth/2-cx*view.z; view.y=v.clientHeight/2-cy*view.z; applyTransform(); };
+addEventListener('keydown', e => {
+  if (e.target.tagName==='TEXTAREA' || e.target.tagName==='INPUT' || e.target.tagName==='SELECT') return;
+  if (e.code==='Space' && screen==='view'){ e.preventDefault(); if (mode!=='blink'){ mode='blink'; $$('.mode').forEach(x=>x.classList.toggle('on', x.dataset.m==='blink')); renderView(); } else toggleBlink(); }
+  if ((e.key==='n'||e.key==='N') && (screen==='view'||screen==='diffs')) selectDiff(Math.min(realRegions().length-1, curDiff+1));
+  if ((e.key==='p'||e.key==='P') && (screen==='view'||screen==='diffs')) selectDiff(Math.max(0, curDiff-1));
+});
+
+// ---------- verschillen ----------
+function realRegions(){ return hero.regions.map((r,i)=>({...r, i})).filter(r=>!r.stamp); }
+function regionText(r){ return r.text.map(i => hero.text[i]).filter(t => t.kind!=='Stamp').map(t =>
+  t.kind==='Changed' ? `<span class="old">${esc(t.old)}</span> &rarr; <span class="new">${esc(t.new)}</span>` :
+  t.kind==='Added' ? `<span class="new">+ ${esc(t.new)}</span>` : t.kind==='Removed' ? `<span class="old">${esc(t.old)}</span>` : `${esc(t.old)} <span class="src">verplaatst ${t.moved_mm.toFixed(0)} mm</span>`).join('<br>'); }
+function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function renderDiffTable(){
+  const tb=$('#difftable tbody'); tb.innerHTML='';
+  realRegions().forEach((r,k) => { const tr=document.createElement('tr'); tr.className='row';
+    const hasText = r.text.some(i => hero.text[i].kind!=='Stamp');
+    tr.innerHTML = `<td>${k+1}</td><td>${(r.bbox.x0*MM).toFixed(0)}, ${(r.bbox.y0*MM).toFixed(0)}</td><td><span class="method"><span class="y">raster</span><span class="${hasText?'y':'n'}">vector</span></span></td><td class="num">${r.removed_px}</td><td class="num">${r.added_px}</td><td>${regionText(r)}</td>`;
+    tr.onclick = () => { selectDiff(k); go('view'); }; tb.appendChild(tr); });
+}
+function selectDiff(k){ curDiff = k; const r = realRegions()[k]; if (!r) return; curDiff = r.i; if (screen==='view'){ zoomTo(r.bbox); renderView(); } renderPanel(); curDiff = r.i; window._diffk = k; }
+
+// ---------- rechterpaneel ----------
+function renderPanel(){
+  const p = $('#panel');
+  if (screen==='view' || screen==='diffs'){
+    p.classList.remove('hide');
+    const rr = realRegions(); const k = window._diffk ?? -1;
+    let h = `<div class="hd">Verschillen <span class="src">${rr.length}</span><span style="margin-left:auto"><button class="btn" onclick="selectDiff(Math.max(0,(window._diffk??0)-1))">&uarr;</button> <button class="btn" onclick="selectDiff(Math.min(${rr.length-1},(window._diffk??-1)+1))">&darr;</button></span></div>`;
+    const chg = hero.text.filter(t=>t.kind!=='Stamp');
+    h += `<div style="padding:8px 12px;color:var(--theme-text-muted);font-size:11.5px">Tekstwijzigingen (vector): ${chg.length} - pixelregio's (raster): ${rr.length} - printstempel genegeerd: ${hero.regions.length-rr.length} regio's</div>`;
+    rr.forEach((r,j) => { h += `<div class="diffitem ${j===k?'on':''}" onclick="selectDiff(${j})"><b>${j+1}</b> <span class="src">${(r.bbox.x0*MM).toFixed(0)}, ${(r.bbox.y0*MM).toFixed(0)} mm</span> <span style="float:right;font-size:11px"><span style="color:var(--c-removed)">-${r.removed_px}</span> <span style="color:#007C93">+${r.added_px}</span></span><div class="t">${regionText(r) || '<span style="color:var(--theme-text-muted)">alleen grafisch (geen tekst)</span>'}</div></div>`; });
+    p.innerHTML = h;
+  } else if (screen==='comments'){
+    p.classList.remove('hide'); renderCommentList();
+  } else p.classList.add('hide');
+}
+
+// ---------- opmerkingen ----------
+function renderCommentList(){
+  const p=$('#panel'); const cnt = s => DATA.comments.filter(c=>c.proposal.startsWith(s)).length;
+  let h = `<div class="hd">Opmerkingen <span class="src">${DATA.comments.length}</span></div><div style="padding:8px 12px;font-size:11.5px" class="legend"><span class="chip p-ok">verwerkt? ${cnt('WAARSCH')}</span><span class="chip p-no">niet ${cnt('NIET')}</span><span class="chip p-q">onduidelijk ${cnt('ONDUID')}</span></div>`;
+  DATA.comments.forEach(c => { const st = status[c.id];
+    h += `<div class="cm ${curComment===c.id?'on':''}" onclick="selectComment(${c.id})"><div><b>#${c.id}</b> ${c.sheet?`<span class="src">${c.sheet}</span>`:'<span class="src">algemeen</span>'} <span class="chip ${pclass(c.proposal)}" style="float:right">${c.proposal.toLowerCase()}</span></div>
+      <div style="margin-top:4px">${esc(c.text).replace(/\n/g,'<br>')}</div>
+      <div class="meta">${esc(c.author)} - ${c.subject} - ${esc(c.reason)}</div>
+      <div style="margin-top:6px" onclick="event.stopPropagation()">Status: <select onchange="status[${c.id}].s=this.value;renderExport()">${['','verwerkt','niet verwerkt','n.v.t.','vraag'].map(o=>`<option ${st.s===o?'selected':''}>${o}</option>`).join('')}</select>
+      <textarea placeholder="notitie" oninput="status[${c.id}].n=this.value;renderExport()">${esc(st.n)}</textarea></div></div>`; });
+  p.innerHTML = h;
+}
+function selectComment(id){
+  curComment = id; const c = DATA.comments.find(c=>c.id===id); renderCommentList();
+  const d = $('#cmdetail');
+  if (!c.img_w){ d.innerHTML = `<div class="pad"><div class="note warn">Opmerking #${id} staat op het voorblad van de opmerkingen-PDF en heeft geen plek op een tekening. Voorstel: <b>onduidelijk</b> - beoordeel zelf.</div><div class="card" style="max-width:700px">${esc(c.text).replace(/\n/g,'<br>')}</div></div>`; return; }
+  const z = c.zone_px, sv = `<svg viewBox="0 0 ${c.img_w} ${c.img_h}"><rect x="${z[0]}" y="${z[1]}" width="${z[2]-z[0]}" height="${z[3]-z[1]}" fill="none" stroke="#8F6A1F" stroke-width="4" stroke-dasharray="12 8"/></svg>`;
+  d.innerHTML = `<div class="pad" style="padding-bottom:0"><b>#${c.id} - ${c.sheet}</b>: ${esc(c.text)} <span class="chip ${pclass(c.proposal)}">${c.proposal.toLowerCase()}</span> <span style="color:var(--theme-text-muted)">- ${esc(c.reason)}; opmerkingenblad uitgelijnd: ${esc(c.reg_c)}</span></div>
+   <div class="quad">
+    <figure><figcaption>Opmerkingen-PDF (aannemer)</figcaption><img src="${IMG['opm'+id+'_c']}">${sv}</figure>
+    <figure><figcaption>A - 15-06-2026</figcaption><img src="${IMG['opm'+id+'_a']}">${sv}</figure>
+    <figure><figcaption>B - 24-06-2026</figcaption><img src="${IMG['opm'+id+'_b']}">${sv}</figure>
+    <figure><figcaption>Verschil A &rarr; B (rood weg, cyaan nieuw)</figcaption><img src="${IMG['opm'+id+'_diff']}">${sv}</figure>
+   </div><div class="pad" style="padding-top:0"><div class="note">Klik in de app op een opmerking &rarr; A, B en de verschillaag zoomen tegelijk naar deze plek. Gestippeld = opmerkingszone (wolk + tekst + pijlen), verschil wordt geteld binnen zone + 8 mm.</div></div>`;
+}
+
+// ---------- export ----------
+function renderExport(){
+  const tb=$('#exporttable tbody'); tb.innerHTML='';
+  DATA.comments.forEach(c => { const st=status[c.id]; const tr=document.createElement('tr');
+    tr.innerHTML = `<td>${c.id}</td><td>${c.sheet||'algemeen'}</td><td>${esc(c.text).replace(/\n/g,' ')}</td><td><span class="chip ${pclass(c.proposal)}">${c.proposal.toLowerCase()}</span></td><td>${st.s}</td><td>${esc(st.n)}</td>`; tb.appendChild(tr); });
+}
+
+// ---------- navigatie ----------
+function go(s){
+  screen = s; $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.s===s));
+  $$('.screen').forEach(x => x.classList.toggle('on', x.id==='s-'+s));
+  renderTree(); renderPanel();
+  if (s==='view'){ if (!imgA) initViewer(); else { renderView(); applyTransform(); } }
+  if (s==='comments' && curComment===null){ const first = DATA.comments.find(c=>c.img_w); if (first) selectComment(first.id); }
+}
+$$('#tabs button').forEach(b => b.onclick = () => go(b.dataset.s));
+function renderStatus(){
+  const cnt = v => DATA.sheets.filter(s=>s.verdict===v).length;
+  $('#status').innerHTML = `<span><b>${DATA.sheets.length}</b> bladen</span><span>gewijzigd <b>${cnt('Changed')}</b></span><span>stempel <b>${cnt('StampOnly')}</b></span><span>gelijk <b>${cnt('Identical')}</b></span><span>niet vergelijkbaar <b>${cnt('NotComparable')}</b></span><span>300 dpi</span><span id="status-zoom"></span><span style="margin-left:auto">Kolthof Bouwadvies - sheetdiff mockup __DATE__</span>`;
+}
+document.querySelector('#dtitle').textContent = HERO; document.querySelector('#vtitle').textContent = HERO;
+renderStatus(); renderTree(); renderSheetTable(); renderDiffTable(); renderExport(); renderPanel();
+</script>
+</body>
+</html>

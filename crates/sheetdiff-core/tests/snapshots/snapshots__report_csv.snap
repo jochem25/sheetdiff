@@ -1,0 +1,9 @@
+---
+source: crates/sheetdiff-core/tests/snapshots.rs
+expression: "report::csv(&sample())"
+---
+blad;titel;oordeel;pixel_pct;regios;tekst_gewijzigd;tekst_toegevoegd;tekst_verwijderd;tekst_verplaatst;uitlijning;boekjes;redenen
+TO-213z;titel TO-213z;NIET VERGELIJKBAAR;0,0000;0;0;0;0;0;identiteit;gevels;UITLIJNING MISLUKT: overlap 41.0 % < 60 %. Vergelijking op dit blad is niet betrouwbaar.
+TO-201n;titel TO-201n;gewijzigd;0,0123;1;1;1;0;0;identiteit;gevels;
+TO-214z;titel TO-214z;alleen printstempel;0,0000;0;0;0;0;0;identiteit;gevels;
+TO-215z;titel TO-215z;gelijk;0,0000;0;0;0;0;0;identiteit;gevels;

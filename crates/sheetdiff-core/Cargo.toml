@@ -1,0 +1,22 @@
+[package]
+name = "sheetdiff-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pdfium-render.workspace = true
+image.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+tracing.workspace = true
+toml.workspace = true
+lopdf.workspace = true
+rust_xlsxwriter.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

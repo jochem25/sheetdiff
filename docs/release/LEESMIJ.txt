@@ -1,0 +1,64 @@
+sheetdiff 1.0.0 - revisieverschil bouwtekeningen (Windows 64-bit)
+=================================================================
+
+Vergelijkt twee uitgiftes van bouwtekeningen (PDF) per blad, toont de verschillen
+als overlay en zet opmerkingen van de aannemer (derde PDF) naast de nieuwe revisie
+met per opmerking een voorstel: verwerkt / niet verwerkt / onduidelijk.
+
+Installeren
+-----------
+Geen installatie. Zet deze drie bestanden in EEN map en start vanaf daar:
+
+  sheetdiff.exe       de viewer (dubbelklikken)
+  sheetdiff-cli.exe   opdrachtregel, voor rapporten en batchwerk
+  pdfium.dll          PDF-renderer; moet naast de exe staan
+
+Staat pdfium.dll ergens anders, wijs hem aan met de omgevingsvariabele
+SHEETDIFF_PDFIUM=<map>.
+
+Viewer
+------
+1. Kies uitgifte A (oud) en B (nieuw): een map of een PDF-boekje.
+2. Bladen worden gekoppeld op tekeningnummer. Per blad: overlay, knipperen,
+   naast elkaar, pixel- en vectorweergave. Inzoomen tot 1:1-pixel (300 dpi).
+3. Optioneel: opmerkingen-PDF van de aannemer erbij. Per opmerking een voorstel;
+   de status zet u zelf. Export naar xlsx/csv en een PDF-kopie van B met de
+   opmerkingen en hun status.
+
+Opdrachtregel (kort)
+--------------------
+  sheetdiff-cli scan <map|pdf>
+  sheetdiff-cli compare <A> <B> --report r.md --xlsx r.xlsx --csv r.csv
+  sheetdiff-cli comments <opm.pdf> <A> <B> --xlsx o.xlsx --pdf-dir map
+  sheetdiff-cli page <a.pdf> <p> <b.pdf> <p>
+  sheetdiff-cli --help        alle opties
+
+Exitcode compare: 0 geen verschillen, 1 verschillen, 2 niet vergelijkbaar of fout.
+
+Uitkomst per blad
+-----------------
+gelijk | alleen printstempel | gewijzigd | nieuw in B | vervallen in B |
+NIET VERGELIJKBAAR. Lukt de uitlijning niet of is een bestand onleesbaar, dan is
+de uitkomst altijd NIET VERGELIJKBAAR, nooit "gelijk".
+
+Bekende grenzen
+---------------
+- Bladwisselen in de viewer kost ~0,5 s; buurbladen worden nog niet vooraf
+  gerenderd.
+- Handmatig uitlijnen (knop bij de uitlijning: rotatie in kwartslagen, schaal,
+  verschuiving in mm) geldt alleen voor het geopende blad en wordt niet
+  bewaard; in sheetdiff-cli kan het niet.
+- Een uitgifte met veel dubbele bladen (zelfde nummer, andere inhoud) scant
+  traag (~1 min); de nieuwste versie wint en de dubbeling wordt gemeld.
+- Het voorstel bij opmerkingen is een sortering, geen oordeel: een opmerking die
+  op een andere plek is verwerkt (bijv. in de legenda), een informatieve
+  opmerking of een los verwijzingsnummer krijgt vaak 'onduidelijk'.
+- Titelherkenning pakt soms tekst uit het sleutelplan.
+
+Licenties
+---------
+sheetdiff: (c) 2026 Kolthof Bouwadvies, naar keuze MIT of Apache-2.0 (LICENSE-MIT,
+LICENSE-APACHE). Broncode: https://github.com/jochem25/sheetdiff
+pdfium.dll: PDFium (BSD 3-clause), zie LICENSE-pdfium.txt. Binaire build van
+bblanchon/pdfium-binaries, chromium/8086 (157.0.8086). Licenties van de
+meegebouwde bibliotheken staan in de map licenties\.

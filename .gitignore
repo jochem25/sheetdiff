@@ -1,0 +1,9 @@
+/target/
+/vendor/
+# Lokale paden naar testdata (golden-tests)
+/.cargo/config.toml
+# Testdata (tekeningen, klantdata) nooit in de repo
+/testdata/
+*.pdf
+!crates/**/tests/fixtures/*.pdf
+*.sheetdiff.json

@@ -1,0 +1,7 @@
+---
+source: crates/sheetdiff-core/tests/snapshots.rs
+expression: "view.join(\"\\n\")"
+---
+#1 p1 Annotation 'algemene opmerkingen' delen=1 eigen=[]
+#2 p2 Annotation 'tekst opnemen in algemeen renvooi' delen=3 eigen=["Jochem Pencil (17-06-2026)"]
+#3 p8 Info 'check akkoord' delen=1 eigen=[]
