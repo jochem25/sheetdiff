@@ -148,6 +148,20 @@ impl Affine {
             ..Self::IDENTITY
         }
     }
+    /// Draait `deg` graden met de klok mee in weergave (y naar beneden) om (cx, cy).
+    pub fn rotate_about(deg: f64, cx: f64, cy: f64) -> Self {
+        let (s, c) = deg.to_radians().sin_cos();
+        Affine::translate(-cx, -cy)
+            .then(&Affine {
+                a: c,
+                b: s,
+                c: -s,
+                d: c,
+                e: 0.0,
+                f: 0.0,
+            })
+            .then(&Affine::translate(cx, cy))
+    }
     pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
         (
             self.a * x + self.c * y + self.e,

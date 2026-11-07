@@ -70,9 +70,13 @@ pub struct Doc {
 impl Doc {
     pub fn open(path: &Path) -> Result<Doc> {
         let p = pdfium()?;
-        let inner = p
-            .load_pdf_from_file(path, None)
-            .map_err(|e| anyhow!("PDF niet te openen: {}: {e}", path.display()))?;
+        let inner = p.load_pdf_from_file(path, None).map_err(|e| {
+            anyhow!(
+                "PDF niet te openen: {}: {}",
+                path.display(),
+                open_reason(&e)
+            )
+        })?;
         Ok(Doc {
             path: path.to_path_buf(),
             inner,
@@ -263,6 +267,24 @@ pub fn render_page_gray(
     let h = (target_size_pt.1 * s).round().max(1.0) as usize;
     let to_px = align.then(&Affine::scale(s));
     render_gray(page, &to_px, w, h)
+}
+
+/// Waarom PDFium een bestand weigert, in het Nederlands.
+fn open_reason(e: &PdfiumError) -> String {
+    use PdfiumInternalError as I;
+    match e {
+        PdfiumError::PdfiumLibraryInternalError(I::FileError) => {
+            "niet gevonden of niet leesbaar".into()
+        }
+        PdfiumError::PdfiumLibraryInternalError(I::FormatError) => {
+            "geen geldige PDF of beschadigd".into()
+        }
+        PdfiumError::PdfiumLibraryInternalError(I::PasswordError | I::SecurityError) => {
+            "beveiligd met een wachtwoord".into()
+        }
+        PdfiumError::IoError(io) => crate::errors::io_text(io),
+        other => other.to_string(),
+    }
 }
 
 /// Tekstrun met bbox in weergavepunten.

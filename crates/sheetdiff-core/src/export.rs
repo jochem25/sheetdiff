@@ -24,9 +24,17 @@ fn status_color(s: Status, p: Proposal) -> [f32; 3] {
         Status::Open => match p {
             Proposal::LikelyDone => [0.06, 0.63, 0.55],
             Proposal::NotDone => [0.86, 0.12, 0.12],
+            Proposal::Elsewhere => [0.85, 0.55, 0.05],
             _ => [0.56, 0.42, 0.12],
         },
     }
+}
+
+/// Blad van een opmerking voor in een export.
+fn sheet_of(c: &crate::comments::Comment) -> String {
+    c.sheet
+        .as_deref()
+        .map_or("algemeen".to_string(), |k| crate::issue::display_key(k, 0))
 }
 
 pub fn comments_csv(r: &CommentsResult, st: &ReviewState) -> String {
@@ -50,7 +58,7 @@ pub fn comments_csv(r: &CommentsResult, st: &ReviewState) -> String {
         o.push_str(&format!(
             "{};{};{:?};{};{};{};{};{};{};{};{}\n",
             c.number,
-            f(c.sheet.as_deref().unwrap_or("algemeen")),
+            f(&sheet_of(c)),
             c.kind,
             f(&c.text),
             f(&c.author),
@@ -93,7 +101,7 @@ pub fn comments_xlsx(r: &CommentsResult, st: &ReviewState, path: &Path) -> Resul
         let e = st.entry(&c.id);
         let rr = (row + 1) as u32;
         ws.write_number_with_format(rr, 0, c.number as f64, &wrap)?;
-        ws.write_with_format(rr, 1, c.sheet.as_deref().unwrap_or("algemeen"), &wrap)?;
+        ws.write_with_format(rr, 1, sheet_of(c), &wrap)?;
         ws.write_with_format(rr, 2, &c.text, &wrap)?;
         ws.write_with_format(rr, 3, &c.author, &wrap)?;
         ws.write_with_format(rr, 4, c.proposal.label(), &wrap)?;
@@ -121,6 +129,7 @@ pub fn diff_xlsx(d: &IssueDiff, path: &Path) -> Result<()> {
         "Blad",
         "Titel",
         "Oordeel",
+        "Koppeling",
         "Pixels %",
         "Regio's",
         "Gewijzigd",
@@ -137,18 +146,19 @@ pub fn diff_xlsx(d: &IssueDiff, path: &Path) -> Result<()> {
     for (row, s) in d.sheets.iter().enumerate() {
         let r = (row + 1) as u32;
         let n = |k| s.text.iter().filter(|t| t.kind == k).count() as f64;
-        ws.write(r, 0, &s.key)?;
+        ws.write(r, 0, s.short_name())?;
         ws.write(r, 1, &s.title)?;
         ws.write(r, 2, s.verdict.label())?;
-        ws.write_number(r, 3, s.pixel_pct)?;
-        ws.write_number(r, 4, s.regions.iter().filter(|x| !x.stamp).count() as f64)?;
-        ws.write_number(r, 5, n(TextChangeKind::Changed))?;
-        ws.write_number(r, 6, n(TextChangeKind::Added))?;
-        ws.write_number(r, 7, n(TextChangeKind::Removed))?;
-        ws.write_number(r, 8, n(TextChangeKind::Moved))?;
+        ws.write(r, 3, &s.pair_label)?;
+        ws.write_number(r, 4, s.pixel_pct)?;
+        ws.write_number(r, 5, s.regions.iter().filter(|x| !x.stamp).count() as f64)?;
+        ws.write_number(r, 6, n(TextChangeKind::Changed))?;
+        ws.write_number(r, 7, n(TextChangeKind::Added))?;
+        ws.write_number(r, 8, n(TextChangeKind::Removed))?;
+        ws.write_number(r, 9, n(TextChangeKind::Moved))?;
         ws.write(
             r,
-            9,
+            10,
             s.registration
                 .as_ref()
                 .map(|x| x.note.as_str())
@@ -156,13 +166,13 @@ pub fn diff_xlsx(d: &IssueDiff, path: &Path) -> Result<()> {
         )?;
         ws.write(
             r,
-            10,
+            11,
             s.b.as_ref()
                 .or(s.a.as_ref())
                 .map(|l| l.booklets.join(", "))
                 .unwrap_or_default(),
         )?;
-        ws.write(r, 11, s.reasons.join(" | "))?;
+        ws.write(r, 12, s.reasons.join(" | "))?;
     }
     let wt = wb.add_worksheet().set_name("Tekst")?;
     for (i, h) in ["Blad", "Soort", "Oud", "Nieuw", "x mm", "y mm"]
@@ -174,7 +184,7 @@ pub fn diff_xlsx(d: &IssueDiff, path: &Path) -> Result<()> {
     let mut r = 1u32;
     for s in d.sheets.iter().filter(|s| s.verdict == Verdict::Changed) {
         for t in s.text.iter().filter(|t| t.kind != TextChangeKind::Stamp) {
-            wt.write(r, 0, &s.key)?;
+            wt.write(r, 0, s.short_name())?;
             wt.write(r, 1, format!("{:?}", t.kind))?;
             wt.write(r, 2, t.old.as_deref().unwrap_or(""))?;
             wt.write(r, 3, t.new.as_deref().unwrap_or(""))?;
@@ -497,7 +507,7 @@ pub fn clouds_on_b(d: &IssueDiff, b: &Issue, out_dir: &Path) -> Result<Vec<PathB
                 color: [1.0, 0.0, 0.0],
                 contents: format!(
                     "W-{}-{:02}: {} px weg, {} px erbij{}",
-                    s.key,
+                    s.short_name(),
                     i + 1,
                     r.removed_px,
                     r.added_px,

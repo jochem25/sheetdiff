@@ -21,7 +21,7 @@ pub fn sheet_markdown(s: &SheetDiff, out: &mut String) {
     let _ = writeln!(
         out,
         "### {} {} - **{}**",
-        s.key,
+        s.short_name(),
         if s.title.is_empty() {
             String::new()
         } else {
@@ -29,6 +29,9 @@ pub fn sheet_markdown(s: &SheetDiff, out: &mut String) {
         },
         s.verdict.label()
     );
+    if !s.pair_label.is_empty() && s.pair_label != "op naam" {
+        let _ = writeln!(out, "- koppeling: {}", s.pair_label);
+    }
     for r in &s.reasons {
         let _ = writeln!(out, "- {r}");
     }
@@ -86,6 +89,11 @@ pub fn sheet_markdown(s: &SheetDiff, out: &mut String) {
     let _ = writeln!(out);
 }
 
+/// Soort koppeling zonder percentage, voor de telling.
+fn pair_kind(label: &str) -> &str {
+    label.split(" (").next().unwrap_or(label)
+}
+
 pub fn markdown(d: &IssueDiff) -> String {
     let mut o = String::new();
     let _ = writeln!(o, "# Vergelijking tekeninguitgiftes\n");
@@ -109,6 +117,17 @@ pub fn markdown(d: &IssueDiff) -> String {
         let _ = writeln!(o, "| {} | {} |", v.label(), d.count(v));
     }
     let _ = writeln!(o);
+    let mut labels: std::collections::BTreeMap<&str, usize> = Default::default();
+    for s in d.sheets.iter().filter(|s| !s.pair_label.is_empty()) {
+        *labels.entry(pair_kind(&s.pair_label)).or_default() += 1;
+    }
+    if labels.keys().any(|k| *k != "op naam") {
+        let _ = writeln!(o, "| koppeling | aantal |\n|---|---|");
+        for (k, n) in &labels {
+            let _ = writeln!(o, "| {k} | {n} |");
+        }
+        let _ = writeln!(o);
+    }
     if d.count(Verdict::NotComparable) > 0 {
         let _ = writeln!(
             o,
@@ -135,11 +154,11 @@ pub fn markdown(d: &IssueDiff) -> String {
     for s in d.sheets.iter().filter(|s| s.verdict != Verdict::Identical) {
         sheet_markdown(s, &mut o);
     }
-    let ident: Vec<&str> = d
+    let ident: Vec<String> = d
         .sheets
         .iter()
         .filter(|s| s.verdict == Verdict::Identical)
-        .map(|s| s.key.as_str())
+        .map(|s| s.short_name())
         .collect();
     if !ident.is_empty() {
         let _ = writeln!(o, "### Gelijk ({})\n\n{}\n", ident.len(), ident.join(", "));
@@ -158,7 +177,7 @@ fn csv_field(s: &str) -> String {
 /// CSV met puntkomma (Nederlandse Excel), een regel per blad.
 pub fn csv(d: &IssueDiff) -> String {
     let mut o = String::from(
-        "blad;titel;oordeel;pixel_pct;regios;tekst_gewijzigd;tekst_toegevoegd;tekst_verwijderd;tekst_verplaatst;uitlijning;boekjes;redenen\n",
+        "blad;titel;oordeel;koppeling;pixel_pct;regios;tekst_gewijzigd;tekst_toegevoegd;tekst_verwijderd;tekst_verplaatst;uitlijning;boekjes;redenen\n",
     );
     for s in &d.sheets {
         let n = |k| s.text.iter().filter(|t| t.kind == k).count();
@@ -174,10 +193,11 @@ pub fn csv(d: &IssueDiff) -> String {
             .unwrap_or_default();
         let _ = writeln!(
             o,
-            "{};{};{};{};{};{};{};{};{};{};{};{}",
-            csv_field(&s.key),
+            "{};{};{};{};{};{};{};{};{};{};{};{};{}",
+            csv_field(&s.short_name()),
             csv_field(&s.title),
             s.verdict.label(),
+            csv_field(&s.pair_label),
             format!("{:.4}", s.pixel_pct).replace('.', ","),
             s.regions.iter().filter(|r| !r.stamp).count(),
             n(TextChangeKind::Changed),

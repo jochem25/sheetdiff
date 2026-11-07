@@ -5,12 +5,14 @@ use crate::render::{RenderService, Resp, SheetSrc, ZoneReq};
 use crate::theme::{self, chip};
 use crate::viewer::{self, CommentMark, LayerTex, Mode, Viewer};
 use eframe::egui::{self, Color32, RichText, Vec2};
+use sheetdiff_core::choices::Choices;
 use sheetdiff_core::comments::{self, CommentsResult, ReviewState, Status};
 use sheetdiff_core::compare::{self, IssueDiff, Progress, SheetDiff, Verdict};
 use sheetdiff_core::geom::{Affine, RectPt, MM_PER_PT, PT_PER_MM};
-use sheetdiff_core::issue::{self, Issue};
+use sheetdiff_core::issue::{self, Issue, LinkMethod};
+use sheetdiff_core::register::ManualAlign;
 use sheetdiff_core::textdiff::TextChangeKind;
-use sheetdiff_core::{export, report, Config};
+use sheetdiff_core::{export, pairing, report, Config};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -23,12 +25,33 @@ pub enum Screen {
     Export,
 }
 
+/// Begin van de melding dat een keuze alleen voor deze vergelijking geldt.
+const CHOICE_NOT_SAVED: &str = "keuze niet bewaard";
+
+type Message = Option<(String, bool)>;
+
+fn unsaved_choice(m: &Message) -> bool {
+    m.as_ref()
+        .is_some_and(|(t, err)| *err && t.starts_with(CHOICE_NOT_SAVED))
+}
+
+/// De melding na een gewone mededeling: een niet bewaarde keuze blijft staan.
+fn after_info(current: Message, text: String) -> Message {
+    if unsaved_choice(&current) {
+        current
+    } else {
+        Some((text, false))
+    }
+}
+
 enum JobMsg {
     Log(String),
     Progress(usize, usize),
     Scanned(Box<Issue>, Box<Issue>),
+    Choices(Box<Choices>, PathBuf),
     Done(Box<IssueDiff>),
     Comments(Box<CommentsResult>),
+    Warning(String),
     Error(String),
     Finished,
 }
@@ -40,6 +63,26 @@ struct Saved {
     c: String,
     cfg: Option<Config>,
     workers: usize,
+}
+
+impl Saved {
+    /// Haalt onthouden paden weg die niet meer bestaan. Geeft de melding daarover terug.
+    fn drop_missing(&mut self) -> Option<String> {
+        let mut gone = Vec::new();
+        for p in [&mut self.a, &mut self.b, &mut self.c] {
+            let path = PathBuf::from(p.trim().trim_matches('"'));
+            if !p.trim().is_empty() && !path.exists() {
+                gone.push(format!("{} {}", issue::path_word(&path), p));
+                p.clear();
+            }
+        }
+        (!gone.is_empty()).then(|| {
+            format!(
+                "niet meer gevonden, uit de lijst gehaald: {}",
+                gone.join("; ")
+            )
+        })
+    }
 }
 
 pub struct App {
@@ -70,20 +113,21 @@ pub struct App {
     logo: egui::TextureHandle,
     message: Option<(String, bool)>,
     auto: Option<Auto>,
-    align: Option<AlignEdit>,
+    align: Option<ManualAlign>,
     sheet_job: Option<Receiver<(String, Result<SheetDiff, String>)>>,
     zone_error: Option<String>,
     status_dirty: Option<f64>,
     last_params: Option<sheetdiff_core::raster::DiffParams>,
-}
-
-/// Handmatige uitlijning van B op A voor het geopende blad.
-#[derive(Clone, Copy, PartialEq)]
-struct AlignEdit {
-    rot: sheetdiff_core::geom::Rot90,
-    scale: f64,
-    dx: f64,
-    dy: f64,
+    /// Gekozen tegenhanger bij handmatig koppelen.
+    link_pick: Option<String>,
+    /// Handmatige keuzes van deze vergelijking en waar ze staan.
+    choices: Option<(Choices, PathBuf)>,
+    /// Opmerkingen die opnieuw geanalyseerd worden na een koppeling.
+    comments_job: Option<Receiver<Result<CommentsResult, String>>>,
+    /// Koppeling gewijzigd: opmerkingen opnieuw analyseren zodra het blad klaar is.
+    comments_stale: bool,
+    /// Wanneer het laatste blad geopend is, om bladwisselen te meten (SHEETDIFF_TIMING=<bestand>).
+    opened: Option<std::time::Instant>,
 }
 
 /// Automatische screenshotmodus (SHEETDIFF_AUTOSHOT=<map>): loopt door de schermen en
@@ -93,15 +137,17 @@ struct Auto {
     step: usize,
     wait_until: f64,
     shot_pending: Option<String>,
+    walked: usize,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::apply(&cc.egui_ctx);
-        let saved: Saved = cc
+        let mut saved: Saved = cc
             .storage
             .and_then(|s| eframe::get_value(s, "sheetdiff"))
             .unwrap_or_default();
+        let gone = saved.drop_missing();
         let logo = {
             let img = image::load_from_memory(include_bytes!("../assets/beeldmerk-96.png"))
                 .expect("logo")
@@ -120,7 +166,7 @@ impl App {
             path_a: saved.a,
             path_b: saved.b,
             path_c: saved.c,
-            cfg: saved.cfg.unwrap_or_default(),
+            cfg: restore_settings(saved.cfg),
             workers: if saved.workers == 0 {
                 sheetdiff_core::parallel::default_workers()
             } else {
@@ -145,17 +191,23 @@ impl App {
             zone: None,
             hover_mm: None,
             logo,
-            message: None,
+            message: gone.map(|m| (m, false)),
             align: None,
             sheet_job: None,
             zone_error: None,
             status_dirty: None,
             last_params: None,
+            link_pick: None,
+            choices: None,
+            comments_job: None,
+            comments_stale: false,
+            opened: None,
             auto: std::env::var("SHEETDIFF_AUTOSHOT").ok().map(|d| Auto {
                 dir: PathBuf::from(d),
                 step: 0,
                 wait_until: 0.0,
                 shot_pending: None,
+                walked: 0,
             }),
         }
         .with_env_paths()
@@ -210,7 +262,7 @@ impl App {
         let busy = self.job_rx.is_some();
         match a.step {
             0 => {
-                self.start_compare(ctx);
+                self.start_compare(ctx, false);
                 a.step = 1;
                 a.wait_until = now + 1.0;
             }
@@ -322,20 +374,29 @@ impl App {
                 self.viewer.mode = Mode::Overlay;
                 self.viewer.fit_pending = true;
                 if let Some(r) = self.cur().and_then(|s| s.registration.clone()) {
-                    self.align = Some(AlignEdit {
-                        rot: r.rotation,
-                        scale: r.scale,
-                        dx: r.dx_mm,
-                        dy: r.dy_mm,
-                    });
+                    self.align = Some(ManualAlign::of(&r));
                 }
                 a.step = 21;
                 a.wait_until = now + 1.0;
             }
             21 => shoot(&mut a, "11_uitlijning"),
             22 => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                a.step = 23;
+                // SHEETDIFF_WALK=<n>: n bladen doorlopen, voor de meting van bladwisselen
+                let n: usize = std::env::var("SHEETDIFF_WALK")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                if a.walked < n {
+                    self.align = None;
+                    let i = self.sel_sheet.unwrap_or(0) + 1;
+                    let count = self.diff.as_ref().map_or(0, |d| d.sheets.len());
+                    self.open_sheet(if i < count { i } else { 0 });
+                    a.walked += 1;
+                    a.wait_until = now + 2.0;
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    a.step = 23;
+                }
             }
             _ => {}
         }
@@ -344,15 +405,20 @@ impl App {
 
     // ------------------------------------------------------------------ jobs
 
-    fn start_compare(&mut self, ctx: &egui::Context) {
+    /// `by_order`: pagina i tegen pagina i, namen genegeerd.
+    fn start_compare(&mut self, ctx: &egui::Context, by_order: bool) {
         let (tx, rx) = std::sync::mpsc::channel::<JobMsg>();
         self.job_rx = Some(rx);
         self.diff = None;
         self.comments = None;
         self.sel_sheet = None;
+        self.message = None; // een melding van de vorige poging hoort niet bij deze vergelijking
         self.progress = (0, 0);
         self.log.clear();
         self.sheet_job = None; // oud herberekenresultaat hoort niet bij de nieuwe vergelijking
+        self.comments_job = None;
+        self.comments_stale = false;
+        self.choices = None;
         self.align = None;
         let (a, b, c) = (
             PathBuf::from(self.path_a.trim().trim_matches('"')),
@@ -368,17 +434,48 @@ impl App {
                 ctx.request_repaint();
             };
             let run = || -> anyhow::Result<()> {
-                send(JobMsg::Log(format!("uitgifte A lezen: {}", a.display())));
-                let ia = issue::scan_issue(&a, &cfg)?;
-                send(JobMsg::Log(format!("uitgifte B lezen: {}", b.display())));
-                let ib = issue::scan_issue(&b, &cfg)?;
-                send(JobMsg::Scanned(Box::new(ia.clone()), Box::new(ib.clone())));
                 let exe = std::env::current_exe()?;
                 let runner = if workers == 0 {
                     compare::Runner::InProcess
                 } else {
                     compare::Runner::Processes { exe: &exe, workers }
                 };
+                let scan = if by_order {
+                    issue::scan_pages_with
+                } else {
+                    issue::scan_issue_with
+                };
+                let choices_path = Choices::default_path(&a, &b);
+                let (choices, warn) = Choices::load(&choices_path, &a, &b)?;
+                if let Some(w) = warn {
+                    send(JobMsg::Log(w));
+                }
+                send(JobMsg::Log(format!("uitgifte A lezen: {}", a.display())));
+                let mut ia = scan(&a, &cfg, &runner)?;
+                send(JobMsg::Log(format!("uitgifte B lezen: {}", b.display())));
+                let mut ib = scan(&b, &cfg, &runner)?;
+                send(JobMsg::Log(
+                    if by_order {
+                        "koppelen op paginavolgorde..."
+                    } else {
+                        "koppelen op inhoud..."
+                    }
+                    .into(),
+                ));
+                let r = pairing::pair_with_choices(
+                    &mut ia, &mut ib, &cfg, &runner, &choices, by_order,
+                )?;
+                if r.links + r.unlinks + r.aligns > 0 {
+                    send(JobMsg::Log(format!(
+                        "bewaarde keuzes: {} gekoppeld, {} ontkoppeld, {} uitgelijnd",
+                        r.links, r.unlinks, r.aligns
+                    )));
+                }
+                for w in r.warnings {
+                    send(JobMsg::Log(w));
+                }
+                send(JobMsg::Choices(Box::new(choices), choices_path));
+                send(JobMsg::Scanned(Box::new(ia.clone()), Box::new(ib.clone())));
                 let d = compare::compare_issues_with(&ia, &ib, &cfg, runner, |p| match p {
                     Progress::Start { total } => send(JobMsg::Progress(0, total)),
                     Progress::Sheet { done, total, .. } => send(JobMsg::Progress(done, total)),
@@ -386,13 +483,19 @@ impl App {
                 send(JobMsg::Done(Box::new(d)));
                 if !c.is_empty() {
                     send(JobMsg::Log("opmerkingen analyseren...".into()));
-                    let r = comments::analyze(std::path::Path::new(&c), &ia, &ib, &cfg)?;
-                    send(JobMsg::Comments(Box::new(r)));
+                    // de vergelijking is gelukt: een fout hier is geen fout in de vergelijking
+                    match comments::analyze(std::path::Path::new(&c), &ia, &ib, &cfg) {
+                        Ok(r) => send(JobMsg::Comments(Box::new(r))),
+                        Err(e) => send(JobMsg::Warning(format!(
+                            "opmerkingen niet geanalyseerd: {}",
+                            sheetdiff_core::errors::nl(&e)
+                        ))),
+                    }
                 }
                 Ok(())
             };
             if let Err(e) = run() {
-                send(JobMsg::Error(format!("{e:#}")));
+                send(JobMsg::Error(sheetdiff_core::errors::nl(&e)));
             }
             send(JobMsg::Finished);
         });
@@ -423,6 +526,7 @@ impl App {
             match m {
                 JobMsg::Log(s) => self.log.push(s),
                 JobMsg::Progress(d, t) => self.progress = (d, t),
+                JobMsg::Choices(c, p) => self.choices = Some((*c, p)),
                 JobMsg::Scanned(a, b) => {
                     self.issue_a = Some(*a);
                     self.issue_b = Some(*b);
@@ -450,13 +554,19 @@ impl App {
                             self.review = st;
                             self.review_path = Some(sp);
                         }
-                        Err(e) => self.log.push(format!("statusbestand: {e:#}")),
+                        Err(e) => self
+                            .log
+                            .push(format!("statusbestand: {}", sheetdiff_core::errors::nl(&e))),
                     }
                     for w in &r.warnings {
                         self.log.push(w.clone());
                     }
                     self.log.push(format!("{} opmerkingen", r.comments.len()));
                     self.comments = Some(*r);
+                }
+                JobMsg::Warning(w) => {
+                    self.log.push(w.clone());
+                    self.message = Some((w, false));
                 }
                 JobMsg::Error(e) => {
                     self.log.push(format!("FOUT: {e}"));
@@ -476,6 +586,18 @@ impl App {
                 Resp::Base(g, l) if g == self.render_gen => {
                     self.viewer.base = Some(viewer::make_tex(ctx, "base", l));
                     self.viewer.detail = None;
+                    if let (Some(t), Ok(f)) =
+                        (self.opened.take(), std::env::var("SHEETDIFF_TIMING"))
+                    {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(f)
+                        {
+                            let _ = writeln!(f, "{:.0}", t.elapsed().as_secs_f64() * 1000.0);
+                        }
+                    }
                 }
                 Resp::Detail(g, l) if g == self.render_gen => {
                     self.viewer.detail = Some(viewer::make_tex(ctx, "detail", l));
@@ -536,11 +658,29 @@ impl App {
         let Some(src) = self.sheet_src(s) else { return };
         self.viewer.reset(src.size_pt);
         self.render_gen = self.render.open(src, self.cfg.compare.diff);
+        self.opened = Some(std::time::Instant::now());
         if self.sel_sheet != Some(idx) {
             self.align = None; // uitlijning hoort bij een blad
         }
         self.sel_sheet = Some(idx);
         self.sel_region = None;
+        self.prefetch_neighbours(idx);
+    }
+
+    /// Vraagt de basislagen van de buurbladen aan, volgende eerst: daar bladert men meestal heen.
+    fn prefetch_neighbours(&mut self, idx: usize) {
+        let Some(d) = &self.diff else { return };
+        if std::env::var_os("SHEETDIFF_NO_PREFETCH").is_some() {
+            return;
+        }
+        let params = self.cfg.compare.diff;
+        let keys = [idx + 1, idx.wrapping_sub(1), idx + 2, idx.wrapping_sub(2)]
+            .into_iter()
+            .filter_map(|i| d.sheets.get(i))
+            .filter_map(|s| self.sheet_src(s))
+            .map(|s| (s, params))
+            .collect();
+        self.render.prefetch.want(keys);
     }
 
     fn cur(&self) -> Option<&SheetDiff> {
@@ -677,7 +817,7 @@ impl App {
                             .color(theme::PETROL),
                     );
                     let sub = match (&self.diff, self.cur()) {
-                        (_, Some(s)) => format!("{} - {}", s.key, s.title),
+                        (_, Some(s)) => s.name(),
                         (Some(d), None) => format!("{} bladen", d.sheets.len()),
                         _ => "tekeninguitgiftes vergelijken".into(),
                     };
@@ -780,8 +920,8 @@ impl App {
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("bladen")
-            .default_size(250.0)
+        egui::Panel::left("bladenlijst")
+            .default_size(LIST_WIDTH)
             .resizable(true)
             .frame(
                 egui::Frame::new()
@@ -816,6 +956,22 @@ impl App {
                             }
                         });
                 });
+                if self.diff.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(9.0 + ui.spacing().item_spacing.x);
+                        let w = name_width(ui);
+                        let head = |t: &str| RichText::new(t).size(10.5).color(theme::GRIJS);
+                        column(ui, w, |ui| {
+                            ui.label(head("blad"));
+                        });
+                        column(ui, STATUS_WIDTH, |ui| {
+                            ui.label(head("status"));
+                        });
+                        column(ui, MARK_WIDTH, |ui| {
+                            ui.label(head("herkend"));
+                        });
+                    });
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
@@ -847,18 +1003,41 @@ impl App {
                                         ui.painter().rect_filled(r, 0.0, theme::TEAL);
                                     }
                                     ui.add_space(6.0);
-                                    ui.add_sized(
-                                        [70.0, 18.0],
-                                        egui::Label::new(RichText::new(&s.key).strong()).truncate(),
-                                    );
-                                    chip(ui, s.verdict.label(), theme::verdict_colors(s.verdict));
-                                    if nc > 0 {
-                                        ui.label(
-                                            RichText::new(format!("{nc} opm"))
-                                                .size(10.5)
-                                                .color(theme::GRIJS),
+                                    let w = name_width(ui);
+                                    column(ui, w, |ui| {
+                                        ui.add(
+                                            egui::Label::new(RichText::new(s.name()).strong())
+                                                .selectable(false)
+                                                .truncate(),
                                         );
-                                    }
+                                    });
+                                    column(ui, STATUS_WIDTH, |ui| {
+                                        chip(
+                                            ui,
+                                            s.verdict.label(),
+                                            theme::verdict_colors(s.verdict),
+                                        );
+                                    });
+                                    column(ui, MARK_WIDTH, |ui| {
+                                        let col = if s.link == Some(LinkMethod::Doubt) {
+                                            theme::OKER
+                                        } else {
+                                            theme::GRIJS
+                                        };
+                                        let mut mark = short_link(s.recognition());
+                                        if nc > 0 {
+                                            mark = format!("{mark}, {nc} opm");
+                                        }
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(mark.trim_start_matches(", "))
+                                                    .size(10.5)
+                                                    .color(col),
+                                            )
+                                            .selectable(false)
+                                            .truncate(),
+                                        );
+                                    });
                                 })
                                 .response
                                 .interact(egui::Sense::click());
@@ -869,7 +1048,7 @@ impl App {
                                     theme::ACTIEF.gamma_multiply(0.5),
                                 );
                             }
-                            let resp = resp.on_hover_text(&s.title);
+                            let resp = resp.on_hover_text(sheet_tooltip(s));
                             if resp.clicked() {
                                 open = Some(i);
                             }
@@ -938,7 +1117,14 @@ impl App {
                 let can = !busy && !self.path_a.trim().is_empty() && !self.path_b.trim().is_empty();
                 let btn = egui::Button::new(RichText::new("Vergelijken").color(Color32::WHITE).strong()).fill(theme::PETROL);
                 if ui.add_enabled(can, btn).clicked() {
-                    self.start_compare(ui.ctx());
+                    self.start_compare(ui.ctx(), false);
+                }
+                if ui
+                    .add_enabled(can, egui::Button::new("Vergelijk op paginavolgorde"))
+                    .on_hover_text("pagina 1 tegen pagina 1, en zo verder; namen en nummers worden genegeerd")
+                    .clicked()
+                {
+                    self.start_compare(ui.ctx(), true);
                 }
                 ui.label(RichText::new(format!(
                     "{} dpi, tolerantie {}, lijnafstand {} px, {} werkers",
@@ -980,7 +1166,7 @@ impl App {
                 let col = if l.starts_with("FOUT") || l.contains("NIET") || l.contains("ANDERE inhoud") { theme::ROOD } else { theme::GRIJS };
                 ui.label(RichText::new(l).color(col).size(12.0));
             }
-            note(ui, "Vergelijkt op tekeningnummer (uit de titelhoek), niet op paginavolgorde of boekje. Een blad dat niet betrouwbaar uit te lijnen is krijgt NIET VERGELIJKBAAR en telt nooit als gelijk.");
+            note(ui, "Koppelt eerst op tekeningnummer (uit de titelhoek), daarna wat overblijft op inhoud (lijnwerk en tekst). Een twijfelachtig paar staat oranje in de lijst. Een blad dat niet betrouwbaar uit te lijnen is krijgt NIET VERGELIJKBAAR en telt nooit als gelijk.");
             let mut warn: Vec<String> = Vec::new();
             if let Some(d) = &self.diff {
                 warn.extend(d.warnings.iter().cloned());
@@ -1002,12 +1188,13 @@ impl App {
         let mut open = None;
         egui::Grid::new("bladtabel")
             .striped(true)
-            .num_columns(9)
+            .num_columns(10)
             .spacing([14.0, 6.0])
             .show(ui, |ui| {
                 for h in [
                     "Blad",
                     "Oordeel",
+                    "Koppeling",
                     "Pixels",
                     "Regio's",
                     "Tekst gew/+/-/verpl",
@@ -1024,13 +1211,18 @@ impl App {
                         continue;
                     }
                     if ui
-                        .link(RichText::new(&s.key).strong())
-                        .on_hover_text(&s.title)
+                        .link(RichText::new(s.name()).strong())
+                        .on_hover_text(sheet_tooltip(s))
                         .clicked()
                     {
                         open = Some(i);
                     }
                     chip(ui, s.verdict.label(), theme::verdict_colors(s.verdict));
+                    if s.recognition().is_empty() {
+                        ui.label("");
+                    } else {
+                        chip(ui, s.recognition(), theme::link_colors(s.link));
+                    }
                     ui.label(format!("{:.3} %", s.pixel_pct).replace('.', ","));
                     ui.label(
                         s.regions
@@ -1132,11 +1324,14 @@ impl App {
                     ui.label(RichText::new(format!("gevonden: {} (overlap {:.1} %)", r.note, r.score * 100.0)).size(12.0).color(theme::GRIJS));
                 }
                 egui::Grid::new("al").num_columns(2).show(ui, |ui| {
-                    use sheetdiff_core::geom::Rot90;
-                    ui.label("Rotatie");
-                    egui::ComboBox::from_id_salt("rot").selected_text(format!("{} gr", e.rot.degrees())).show_ui(ui, |ui| {
-                        for r in Rot90::ALL {
-                            ui.selectable_value(&mut e.rot, r, format!("{} gr", r.degrees()));
+                    ui.label("Rotatie (gr)");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut e.rotation_deg).speed(0.01).range(-360.0..=360.0).fixed_decimals(2));
+                        if ui.small_button("-90").clicked() {
+                            e.rotation_deg -= 90.0;
+                        }
+                        if ui.small_button("+90").clicked() {
+                            e.rotation_deg += 90.0;
                         }
                     });
                     ui.end_row();
@@ -1144,13 +1339,13 @@ impl App {
                     ui.add(egui::DragValue::new(&mut e.scale).speed(0.0001).range(0.9..=1.1).fixed_decimals(4));
                     ui.end_row();
                     ui.label("Verschuiving x (mm)");
-                    ui.add(egui::DragValue::new(&mut e.dx).speed(0.05).fixed_decimals(2));
+                    ui.add(egui::DragValue::new(&mut e.dx_mm).speed(0.05).fixed_decimals(2));
                     ui.end_row();
                     ui.label("Verschuiving y (mm)");
-                    ui.add(egui::DragValue::new(&mut e.dy).speed(0.05).fixed_decimals(2));
+                    ui.add(egui::DragValue::new(&mut e.dy_mm).speed(0.05).fixed_decimals(2));
                     ui.end_row();
                 });
-                ui.label(RichText::new("De weergave volgt direct; 'Opnieuw vergelijken' rekent het blad met deze uitlijning door.").size(11.5).color(theme::GRIJS));
+                ui.label(RichText::new("De weergave volgt direct; 'Opnieuw vergelijken' rekent het blad met deze uitlijning door en bewaart hem. 'Automatisch' haalt de bewaarde uitlijning weg.").size(11.5).color(theme::GRIJS));
                 ui.horizontal(|ui| {
                     let busy = self.sheet_job.is_some();
                     if ui.add_enabled(!busy, egui::Button::new(RichText::new("Opnieuw vergelijken").color(Color32::WHITE)).fill(theme::PETROL)).clicked() {
@@ -1168,10 +1363,7 @@ impl App {
         if e != before {
             if let (Some(bs), Some(s)) = (self.b_size(), self.cur().cloned()) {
                 if let Some(mut src) = self.sheet_src(&s) {
-                    src.b_to_a = sheetdiff_core::register::Registration::manual(
-                        e.rot, bs, e.scale, e.dx, e.dy,
-                    )
-                    .transform;
+                    src.b_to_a = e.registration(bs).transform;
                     // oude basislaag blijft staan tot de nieuwe er is
                     self.viewer.detail = None;
                     self.viewer.detail_requested = None;
@@ -1180,12 +1372,36 @@ impl App {
             }
         }
         if apply || auto {
-            self.recompare_sheet(if auto { None } else { Some(e) }, ctx);
+            self.set_align(if auto { None } else { Some(e) });
+            self.recompare_sheet(ctx);
         }
         self.align = if open { Some(e) } else { None };
     }
 
-    fn recompare_sheet(&mut self, e: Option<AlignEdit>, ctx: &egui::Context) {
+    /// Zet de uitlijning van het geopende paar en bewaart hem.
+    fn set_align(&mut self, m: Option<ManualAlign>) {
+        let Some(key) = self.cur().map(|s| s.key.clone()) else {
+            return;
+        };
+        let Some(sa) = self.issue_a.as_mut().and_then(|i| i.sheets.get_mut(&key)) else {
+            return;
+        };
+        sa.align = m;
+        let sa = sa.clone();
+        let Some(sb) = self
+            .issue_b
+            .as_ref()
+            .and_then(|i| i.sheets.get(&key))
+            .cloned()
+        else {
+            return;
+        };
+        self.save_choices(|c| c.set_align(&sa, &sb, m));
+        self.comments_stale = true;
+    }
+
+    /// Vergelijkt het geopende paar opnieuw, met de uitlijning die op het blad staat.
+    fn recompare_sheet(&mut self, ctx: &egui::Context) {
         let Some(s) = self.cur().cloned() else {
             return;
         };
@@ -1202,33 +1418,165 @@ impl App {
         ) else {
             return;
         };
-        let manual = e.map(|e| {
-            let mut r = sheetdiff_core::register::Registration::manual(
-                e.rot,
-                sb.geom.display_size(),
-                e.scale,
-                e.dx,
-                e.dy,
-            );
-            r.note = format!(
-                "handmatig: rotatie {} gr, schaal {:.4}, verschuiving {:.2} / {:.2} mm",
-                e.rot.degrees(),
-                e.scale,
-                e.dx,
-                e.dy
-            );
-            r
-        });
         let cfg = self.cfg.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.sheet_job = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let r = compare::compare_sheet(&sa, &sb, &cfg, manual.as_ref())
-                .map_err(|e| format!("{e:#}"));
+            let r = compare::compare_sheet(&sa, &sb, &cfg, None)
+                .map_err(|e| sheetdiff_core::errors::nl(&e));
             let _ = tx.send((key, r));
             ctx.request_repaint();
         });
+    }
+
+    /// Werkt het keuzebestand bij. Lukt schrijven niet (alleen-lezen uitgifte), dan geldt de keuze
+    /// voor deze vergelijking en zegt de app dat hardop.
+    fn save_choices(&mut self, change: impl FnOnce(&mut Choices)) {
+        let Some((c, p)) = self.choices.as_mut() else {
+            return;
+        };
+        change(c);
+        match c.save(p) {
+            Ok(()) if unsaved_choice(&self.message) => self.message = None,
+            Ok(()) => {}
+            Err(e) => {
+                let e = sheetdiff_core::errors::nl(&e);
+                self.message = Some((format!("{CHOICE_NOT_SAVED}: {e}"), true));
+            }
+        }
+    }
+
+    /// Zet een gewone melding, behalve als er nog staat dat een keuze niet bewaard is: die mag
+    /// niet wegvallen achter 'paar ontkoppeld' of 'blad opnieuw vergeleken'.
+    fn info(&mut self, text: impl Into<String>) {
+        self.message = after_info(self.message.take(), text.into());
+    }
+
+    /// Start de opmerkingenanalyse opnieuw met de huidige koppeling. Statussen staan los van de
+    /// analyse en blijven dus staan.
+    fn reanalyze_comments(&mut self, ctx: &egui::Context) {
+        self.comments_stale = false;
+        let c = self.path_c.trim().trim_matches('"').to_string();
+        let (Some(ia), Some(ib)) = (self.issue_a.clone(), self.issue_b.clone()) else {
+            return;
+        };
+        if c.is_empty() || self.comments.is_none() {
+            return;
+        }
+        let cfg = self.cfg.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.comments_job = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let r = comments::analyze(std::path::Path::new(&c), &ia, &ib, &cfg)
+                .map_err(|e| sheetdiff_core::errors::nl(&e));
+            let _ = tx.send(r);
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_comments_job(&mut self, ctx: &egui::Context) {
+        if self.comments_stale && self.sheet_job.is_none() && self.comments_job.is_none() {
+            self.reanalyze_comments(ctx);
+        }
+        let Some(rx) = &self.comments_job else { return };
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("opmerkingenanalyse onverwacht gestopt".into())
+            }
+        };
+        self.comments_job = None;
+        match r {
+            Ok(r) => {
+                self.info(format!(
+                    "{} opmerkingen opnieuw geanalyseerd",
+                    r.comments.len()
+                ));
+                self.sel_comment = None;
+                self.comments = Some(r);
+            }
+            Err(e) => self.message = Some((format!("opmerkingen: {e}"), true)),
+        }
+    }
+
+    /// Koppelt een vervallen blad aan een nieuw blad (of andersom), vergelijkt ze en analyseert de
+    /// opmerkingen opnieuw. De keuze wordt bewaard en geldt ook bij een volgende vergelijking.
+    fn link_manual(&mut self, key_a: &str, key_b: &str, ctx: &egui::Context) {
+        let (Some(ia), Some(ib)) = (self.issue_a.as_mut(), self.issue_b.as_mut()) else {
+            return;
+        };
+        let key = match issue::link_sheets(ia, ib, key_a, key_b, LinkMethod::Manual) {
+            Ok(k) => k,
+            Err(e) => {
+                self.message = Some((sheetdiff_core::errors::nl(&e), true));
+                return;
+            }
+        };
+        let (sa, sb) = (ia.sheets[&key].clone(), ib.sheets[&key].clone());
+        let note = ia.links.last().and_then(|l| l.note());
+        self.save_choices(|c| c.set_link(&sa, &sb));
+        self.comments_stale = true;
+        let (sa, sb) = (&sa, &sb);
+        let Some(d) = self.diff.as_mut() else { return };
+        // de twee losse regels worden een regel; de uitkomst volgt uit de herberekening
+        d.sheets.retain(|s| s.key != key_b);
+        if let Some(row) = d.sheets.iter_mut().find(|s| s.key == key_a) {
+            row.key = key.clone();
+            row.a = Some(sa.into());
+            row.b = Some(sb.into());
+            row.verdict = Verdict::NotComparable;
+            row.reasons = vec!["wordt vergeleken...".into()];
+        }
+        if let Some(n) = note {
+            d.warnings.push(n);
+        }
+        d.sheets.sort_by(|x, y| x.key.cmp(&y.key));
+        self.sel_sheet = d.sheets.iter().position(|s| s.key == key);
+        self.sel_region = None;
+        self.link_pick = None;
+        self.recompare_sheet(ctx);
+    }
+
+    /// Maakt een paar los: het blad wordt weer een vervallen en een nieuw blad, die de gebruiker
+    /// daarna zelf kan koppelen. Wordt net als koppelen bewaard.
+    fn unlink_pair(&mut self, key: &str) {
+        let (Some(ia), Some(ib)) = (self.issue_a.as_mut(), self.issue_b.as_mut()) else {
+            return;
+        };
+        let note = ia
+            .links
+            .iter()
+            .find(|l| l.key == key)
+            .and_then(|l| l.note());
+        let (ka, kb) = match issue::unlink_sheets(ia, ib, key) {
+            Ok(k) => k,
+            Err(e) => {
+                self.message = Some((sheetdiff_core::errors::nl(&e), true));
+                return;
+            }
+        };
+        let (sa, sb) = (ia.sheets[&ka].clone(), ib.sheets[&kb].clone());
+        self.save_choices(|c| c.set_unlink(&sa, &sb));
+        self.comments_stale = true;
+        let (sa, sb) = (&sa, &sb);
+        let Some(d) = self.diff.as_mut() else { return };
+        d.sheets.retain(|s| s.key != key);
+        d.warnings.retain(|w| Some(w) != note.as_ref());
+        let cfg = &self.cfg;
+        d.sheets
+            .push(compare::only(&ka, sa, Verdict::RemovedFromB, cfg, true));
+        d.sheets
+            .push(compare::only(&kb, sb, Verdict::AddedInB, cfg, false));
+        d.sheets.sort_by(|x, y| x.key.cmp(&y.key));
+        let idx = d.sheets.iter().position(|s| s.key == ka);
+        self.link_pick = Some(kb);
+        self.info("paar ontkoppeld");
+        if let Some(i) = idx {
+            self.open_sheet(i);
+        }
     }
 
     fn poll_sheet_job(&mut self) {
@@ -1246,6 +1594,11 @@ impl App {
             match r {
                 Ok(mut d) => {
                     d.mask = None;
+                    let link = self
+                        .issue_a
+                        .as_ref()
+                        .and_then(|i| i.links.iter().find(|l| l.key == key));
+                    d.apply_link(link);
                     // op sleutel terugzetten: de lijst kan intussen opnieuw zijn opgebouwd
                     let idx = self
                         .diff
@@ -1253,7 +1606,10 @@ impl App {
                         .and_then(|df| df.sheets.iter().position(|s| s.key == key));
                     let Some(idx) = idx else {
                         self.message = Some((
-                            format!("{key}: resultaat hoort niet meer bij de huidige vergelijking"),
+                            format!(
+                                "{}: resultaat hoort niet meer bij de huidige vergelijking",
+                                issue::display_key(&key, 0)
+                            ),
                             true,
                         ));
                         return;
@@ -1262,7 +1618,10 @@ impl App {
                         *slot = d;
                     }
                     if self.sel_sheet != Some(idx) {
-                        self.message = Some((format!("{key} opnieuw vergeleken"), false));
+                        self.info(format!(
+                            "{} opnieuw vergeleken",
+                            issue::display_key(&key, 0)
+                        ));
                         return;
                     }
                     let keep = (self.viewer.zoom, self.viewer.pan);
@@ -1270,14 +1629,9 @@ impl App {
                     self.viewer.fit_pending = false;
                     (self.viewer.zoom, self.viewer.pan) = keep;
                     if let Some(r) = self.cur().and_then(|s| s.registration.clone()) {
-                        self.align = self.align.map(|_| AlignEdit {
-                            rot: r.rotation,
-                            scale: r.scale,
-                            dx: r.dx_mm,
-                            dy: r.dy_mm,
-                        });
+                        self.align = self.align.map(|_| ManualAlign::of(&r));
                     }
-                    self.message = Some(("blad opnieuw vergeleken".into(), false));
+                    self.info("blad opnieuw vergeleken");
                 }
                 Err(e) => self.message = Some((e, true)),
             }
@@ -1296,7 +1650,10 @@ impl App {
                 self.status_dirty = None;
                 if let Some(p) = &self.review_path {
                     if let Err(e) = self.review.save(p) {
-                        self.message = Some((format!("status niet opgeslagen: {e:#}"), true));
+                        self.message = Some((
+                            format!("status niet opgeslagen: {}", sheetdiff_core::errors::nl(&e)),
+                            true,
+                        ));
                     }
                 }
             }
@@ -1325,7 +1682,7 @@ impl App {
             ui.spacing_mut().slider_width = 110.0;
             ui.add_space(6.0);
             ui.label(
-                RichText::new(self.cur().map(|s| s.key.clone()).unwrap_or_default())
+                RichText::new(self.cur().map(|s| s.short_name()).unwrap_or_default())
                     .strong()
                     .color(theme::PETROL),
             );
@@ -1377,12 +1734,7 @@ impl App {
                 .clicked()
             {
                 if let Some(r) = self.cur().and_then(|s| s.registration.clone()) {
-                    self.align = Some(AlignEdit {
-                        rot: r.rotation,
-                        scale: r.scale,
-                        dx: r.dx_mm,
-                        dy: r.dy_mm,
-                    });
+                    self.align = Some(ManualAlign::of(&r));
                 }
             }
             legend(ui);
@@ -1471,6 +1823,7 @@ impl App {
                         for r in &s.reasons {
                             ui.label(RichText::new(r).size(11.5).color(theme::OKER));
                         }
+                        self.link_controls(ui, &s);
                         if let Some(v) = &s.vector {
                             ui.label(
                                 RichText::new(format!(
@@ -1579,6 +1932,79 @@ impl App {
         }
     }
 
+    /// Bij een blad zonder tegenhanger: kies het blad aan de andere kant dat hetzelfde is.
+    fn link_controls(&mut self, ui: &mut egui::Ui, s: &SheetDiff) {
+        if s.a.is_some() && s.b.is_some() {
+            let idle = self.job_rx.is_none() && self.sheet_job.is_none();
+            let mut unlink = false;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("koppeling:").size(11.5));
+                chip(ui, &s.pair_label, theme::link_colors(s.link));
+                unlink = ui
+                    .add_enabled(idle, egui::Button::new("ontkoppelen"))
+                    .on_hover_text(
+                        "dit zijn twee verschillende bladen: terug naar vervallen en nieuw",
+                    )
+                    .clicked();
+            });
+            if unlink {
+                self.unlink_pair(&s.key);
+            }
+            return;
+        }
+        let other = match s.verdict {
+            Verdict::RemovedFromB => Verdict::AddedInB,
+            Verdict::AddedInB => Verdict::RemovedFromB,
+            _ => return,
+        };
+        let options: Vec<(String, String)> = self
+            .diff
+            .iter()
+            .flat_map(|d| &d.sheets)
+            .filter(|c| c.verdict == other)
+            .map(|c| (c.key.clone(), c.name()))
+            .collect();
+        if options.is_empty() {
+            return;
+        }
+        let side = if other == Verdict::AddedInB { "B" } else { "A" };
+        let mut pick = self
+            .link_pick
+            .clone()
+            .filter(|p| options.iter().any(|(k, _)| k == p))
+            .unwrap_or_else(|| options[0].0.clone());
+        let mut link = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("koppelen aan blad in {side}:")).size(11.5));
+            egui::ComboBox::from_id_salt("koppelen")
+                .selected_text(
+                    options
+                        .iter()
+                        .find(|(k, _)| *k == pick)
+                        .map_or("", |(_, n)| n.as_str()),
+                )
+                .width(220.0)
+                .show_ui(ui, |ui| {
+                    for (k, n) in &options {
+                        ui.selectable_value(&mut pick, k.clone(), n);
+                    }
+                });
+            let idle = self.job_rx.is_none() && self.sheet_job.is_none();
+            link = ui
+                .add_enabled(idle, egui::Button::new("koppelen"))
+                .clicked();
+        });
+        self.link_pick = Some(pick.clone());
+        if link {
+            let ctx = ui.ctx().clone();
+            if other == Verdict::AddedInB {
+                self.link_manual(&s.key, &pick, &ctx);
+            } else {
+                self.link_manual(&pick, &s.key, &ctx);
+            }
+        }
+    }
+
     fn comments_panel(&mut self, ui: &mut egui::Ui) {
         let Some(r) = self.comments.clone() else {
             return;
@@ -1594,7 +2020,7 @@ impl App {
                 );
                 ui.horizontal(|ui| {
                     use comments::Proposal::*;
-                    for p in [LikelyDone, NotDone, Unclear, Info] {
+                    for p in [LikelyDone, Elsewhere, NotDone, Unclear, Info] {
                         let n = r.comments.iter().filter(|c| c.proposal == p).count();
                         chip(ui, &format!("{} {n}", p.label()), theme::proposal_colors(p));
                     }
@@ -1616,11 +2042,10 @@ impl App {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(format!("#{}", c.number)).strong());
                                         ui.label(
-                                            RichText::new(
-                                                c.sheet
-                                                    .clone()
-                                                    .unwrap_or_else(|| "algemeen".into()),
-                                            )
+                                            RichText::new(sheet_label(
+                                                self.diff.as_ref(),
+                                                c.sheet.as_deref(),
+                                            ))
                                             .size(11.0)
                                             .color(theme::GRIJS),
                                         );
@@ -1724,7 +2149,7 @@ impl App {
         };
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
             ui.add_space(10.0);
-            ui.label(RichText::new(format!("Verschillenlijst - {} {}", s.key, s.title)).size(18.0).strong().color(theme::PETROL));
+            ui.label(RichText::new(format!("Verschillenlijst - {}", s.name())).size(18.0).strong().color(theme::PETROL));
             ui.label(RichText::new("Elke regio is een navigatiepunt; de weergave blijft de pixel. N / P = volgende / vorige.").color(theme::GRIJS));
             let mut go = None;
             egui::Grid::new("diffs").striped(true).num_columns(6).spacing([14.0, 6.0]).show(ui, |ui| {
@@ -1798,7 +2223,7 @@ impl App {
                 RichText::new(format!(
                     "#{} {}",
                     c.number,
-                    c.sheet.clone().unwrap_or_else(|| "algemeen".into())
+                    sheet_label(self.diff.as_ref(), c.sheet.as_deref())
                 ))
                 .strong(),
             );
@@ -2001,7 +2426,7 @@ impl App {
                         for c in &r.comments {
                             let e = self.review.entry(&c.id);
                             ui.label(c.number.to_string());
-                            ui.label(c.sheet.clone().unwrap_or_else(|| "algemeen".into()));
+                            ui.label(sheet_label(self.diff.as_ref(), c.sheet.as_deref()));
                             ui.label(c.text.replace('\n', " "));
                             chip(ui, c.proposal.label(), theme::proposal_colors(c.proposal));
                             ui.label(e.status.label());
@@ -2017,7 +2442,7 @@ impl App {
     fn result(&mut self, r: anyhow::Result<()>, p: &std::path::Path) {
         match r {
             Ok(()) => self.message = Some((format!("geschreven: {}", p.display()), false)),
-            Err(e) => self.message = Some((format!("{e:#}"), true)),
+            Err(e) => self.message = Some((sheetdiff_core::errors::nl(&e), true)),
         }
     }
     fn result_files(&mut self, r: anyhow::Result<Vec<PathBuf>>) {
@@ -2034,7 +2459,7 @@ impl App {
                     false,
                 ))
             }
-            Err(e) => self.message = Some((format!("{e:#}"), true)),
+            Err(e) => self.message = Some((sheetdiff_core::errors::nl(&e), true)),
         }
     }
 
@@ -2092,6 +2517,7 @@ impl eframe::App for App {
         self.poll_jobs();
         self.poll_render(&ctx);
         self.poll_sheet_job();
+        self.poll_comments_job(ui.ctx());
         self.flush_status(&ctx);
         self.keys(&ctx);
         self.auto_step(&ctx);
@@ -2129,6 +2555,10 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // een testrun mag de paden en instellingen van de gebruiker niet overschrijven
+        if self.auto.is_some() {
+            return;
+        }
         eframe::set_value(
             storage,
             "sheetdiff",
@@ -2141,6 +2571,101 @@ impl eframe::App for App {
             },
         );
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsaved_choice_stays_until_it_is_saved() {
+        let fout = Some((format!("{CHOICE_NOT_SAVED}: geen toegang"), true));
+        assert_eq!(after_info(fout.clone(), "paar ontkoppeld".into()), fout);
+        let gewoon = Some(("paar ontkoppeld".to_string(), false));
+        assert_eq!(after_info(None, "paar ontkoppeld".into()), gewoon);
+        let andere_fout = Some(("opmerkingen: mislukt".to_string(), true));
+        assert_eq!(after_info(andere_fout, "paar ontkoppeld".into()), gewoon);
+    }
+
+    #[test]
+    fn remembered_path_that_is_gone_leaves_with_a_soft_note() {
+        let here = std::env::current_dir().unwrap().display().to_string();
+        let mut s = Saved {
+            a: "Z:/weg/Z_01_07_D5.pdf".into(),
+            b: here.clone(),
+            c: String::new(),
+            ..Default::default()
+        };
+        let note = s.drop_missing().unwrap();
+        assert_eq!(s.a, "");
+        assert_eq!(s.b, here);
+        assert!(note.contains("bestand Z:/weg/Z_01_07_D5.pdf"), "{note}");
+        assert_eq!(s.drop_missing(), None);
+    }
+}
+
+/// Bladenlijst: startbreedte en vaste kolommen; de naamkolom krijgt de rest en groeit mee als het
+/// paneel breder gesleept wordt.
+const LIST_WIDTH: f32 = 500.0;
+const STATUS_WIDTH: f32 = 122.0;
+const MARK_WIDTH: f32 = 84.0;
+
+/// Wat er in de rij overblijft voor de naam.
+fn name_width(ui: &egui::Ui) -> f32 {
+    let gaps = 2.0 * ui.spacing().item_spacing.x;
+    (ui.available_width() - STATUS_WIDTH - MARK_WIDTH - gaps).max(60.0)
+}
+
+/// Kolom van vaste breedte in een rij.
+fn column(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 18.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(width);
+            add(ui);
+        },
+    );
+}
+
+/// Alleen wat in Instellingen te wijzigen is komt uit de vorige sessie. De rest (patronen,
+/// drempels) volgt de defaults van deze versie; anders blijft een nieuw patroon stil buiten werking.
+fn restore_settings(saved: Option<Config>) -> Config {
+    let mut cfg = Config::default();
+    if let Some(s) = saved {
+        cfg.compare.dpi = s.compare.dpi;
+        cfg.compare.diff.tolerance = s.compare.diff.tolerance;
+        cfg.compare.diff.radius_px = s.compare.diff.radius_px;
+        cfg.comments.own_authors = s.comments.own_authors;
+    }
+    cfg
+}
+
+/// Volledige naam en waar het blad staat, voor de tooltip in de bladenlijst.
+fn sheet_tooltip(s: &SheetDiff) -> String {
+    let mut t = s.name();
+    for (side, l) in [("A", &s.a), ("B", &s.b)] {
+        if let Some(l) = l {
+            let f = l.file.file_name().unwrap_or_default().to_string_lossy();
+            t.push_str(&format!("\n{side}: {f}, pagina {}", l.page + 1));
+        }
+    }
+    t
+}
+
+/// Korte naam van het blad bij een opmerking.
+fn sheet_label(d: Option<&IssueDiff>, key: Option<&str>) -> String {
+    let Some(key) = key else {
+        return "algemeen".into();
+    };
+    d.and_then(|d| d.sheets.iter().find(|s| s.key == key))
+        .map(|s| s.short_name())
+        .unwrap_or_else(|| issue::display_key(key, 0))
+}
+
+/// Koppeling kort voor de bladlijst: "op inhoud (87 %)" wordt "op inhoud 87 %".
+fn short_link(label: &str) -> String {
+    label.replace(['(', ')'], "")
 }
 
 fn status_color(s: Status, p: comments::Proposal) -> Color32 {

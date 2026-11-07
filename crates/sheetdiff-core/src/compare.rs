@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::geom::{Affine, RectPt, MM_PER_PT, PT_PER_MM};
-use crate::issue::{Issue, SheetRef};
+use crate::issue::{Issue, LinkMethod, SheetLink, SheetRef};
 use crate::pdf::{self, Doc};
 use crate::raster::{self, CoarseMask};
 use crate::register::{self, Registration};
@@ -80,8 +80,59 @@ pub struct SheetDiff {
     /// Vectorvergelijking (paden): samenvatting en clusters in A-weergavepunten.
     #[serde(default)]
     pub vector: Option<VectorSummary>,
+    /// Niet op sleutel gekoppeld: waarschuwing voor rapport en UI.
+    #[serde(default)]
+    pub link: Option<LinkMethod>,
+    /// Hoe de twee bladen gekoppeld zijn: "op naam", "op inhoud (87 %)", "twijfel (62 %)",
+    /// "op paginavolgorde", "handmatig". Leeg bij een blad zonder tegenhanger.
+    #[serde(default)]
+    pub pair_label: String,
     #[serde(skip)]
     pub mask: Option<CoarseMask>,
+}
+
+impl SheetDiff {
+    /// Korte weergavenaam: tekeningnummer, of de bestandsnaam met ` p.n` bij meer pagina's.
+    pub fn short_name(&self) -> String {
+        let pages = self
+            .b
+            .as_ref()
+            .or(self.a.as_ref())
+            .map_or(0, |l| l.file_pages);
+        crate::issue::display_key(&self.key, pages)
+    }
+
+    /// Weergavenaam: korte naam plus titel, als die bekend is.
+    pub fn name(&self) -> String {
+        let short = self.short_name();
+        if self.title.is_empty() || short.contains(&self.title) {
+            short
+        } else {
+            format!("{short} - {}", self.title)
+        }
+    }
+
+    /// Hoe het blad herkend is, als klein label naast de naam.
+    pub fn recognition(&self) -> &str {
+        if self.pair_label.is_empty() && self.key.starts_with('?') {
+            "geen nummer"
+        } else {
+            &self.pair_label
+        }
+    }
+
+    /// Zet koppeling, label en de melding bij dit blad.
+    pub fn apply_link(&mut self, link: Option<&SheetLink>) {
+        self.link = link.map(|l| l.method);
+        self.pair_label = match link {
+            Some(l) => l.label(),
+            None if self.a.is_some() && self.b.is_some() => "op naam".into(),
+            None => String::new(),
+        };
+        if let Some(n) = link.and_then(|l| l.note()) {
+            self.reasons.insert(0, n);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -162,6 +213,9 @@ pub struct SheetLoc {
     pub file: std::path::PathBuf,
     pub page: usize,
     pub booklets: Vec<String>,
+    /// Aantal pagina's van het bestand; 0 = onbekend.
+    #[serde(default)]
+    pub file_pages: usize,
 }
 
 impl From<&SheetRef> for SheetLoc {
@@ -170,6 +224,7 @@ impl From<&SheetRef> for SheetLoc {
             file: s.file.clone(),
             page: s.page,
             booklets: s.booklets.clone(),
+            file_pages: s.file_pages,
         }
     }
 }
@@ -239,6 +294,9 @@ fn mask_regions(mask: &CoarseMask, cfg: &Config) -> Vec<Region> {
         .collect()
 }
 
+/// Zover rond de verschoven delen van de titelhoek loopt het titelvak door.
+const TITLE_BLOCK_MARGIN_MM: f64 = 12.0;
+
 /// Vergelijkt een bladpaar.
 pub fn compare_sheet(
     a: &SheetRef,
@@ -254,8 +312,14 @@ pub fn compare_sheet(
     let size_a = a.geom.display_size();
     let mut reasons = Vec::new();
 
-    let reg = match manual {
-        Some(r) => r.clone(),
+    let reg = match manual
+        .cloned()
+        .or_else(|| a.align.map(|m| m.registration(b.geom.display_size())))
+    {
+        Some(mut r) => {
+            r.measure(&page_a, size_a, &page_b, &cfg.register)?;
+            r
+        }
         None => register::register(&page_a, &a.geom, &page_b, &b.geom, &cfg.register)?,
     };
     let mut out = SheetDiff {
@@ -278,6 +342,8 @@ pub fn compare_sheet(
         text: Vec::new(),
         seconds: 0.0,
         vector: None,
+        link: None,
+        pair_label: String::new(),
         mask: None,
     };
     if !reg.ok {
@@ -349,7 +415,10 @@ pub fn compare_sheet(
             Ok(r) => r,
             Err(e) => {
                 text_failed = true;
-                reasons.push(format!("tekstlaag {side} onleesbaar: {e:#}"));
+                reasons.push(format!(
+                    "tekstlaag {side} onleesbaar: {}",
+                    crate::errors::nl(&e)
+                ));
                 Vec::new()
             }
         }
@@ -363,11 +432,34 @@ pub fn compare_sheet(
     // Tekst in verschoven delen (kader, legenda) vergelijken onder de kadertransformatie,
     // de rest onder de hoofdtransformatie. Anders koppelt de nabijheidsstap kadertekst aan
     // verkeerde buren.
-    let moved_rects: Vec<RectPt> = regions
+    let mut moved_rects: Vec<RectPt> = regions
         .iter()
         .filter(|r| r.moved_mm.is_some())
         .map(|r| r.bbox.expand(PT_PER_MM))
         .collect();
+    // Is een deel van de titelhoek verschoven, dan is het hele titelvak dat: een regel die echt
+    // wijzigde (datum), is zelf geen verschoven regio maar hoort wel bij het kader.
+    let frac = cfg.identify.title_zone_frac;
+    let zone = RectPt::new(
+        size_a.0 * (1.0 - frac),
+        size_a.1 * (1.0 - frac),
+        size_a.0,
+        size_a.1,
+    );
+    let block = moved_rects
+        .iter()
+        .filter(|r| zone.contains(r))
+        .copied()
+        .reduce(|x, y| x.union(&y));
+    if let Some(b) = block {
+        let b = b.expand(TITLE_BLOCK_MARGIN_MM * PT_PER_MM);
+        moved_rects.push(RectPt::new(
+            b.x0.max(zone.x0),
+            b.y0.max(zone.y0),
+            b.x1.min(zone.x1),
+            b.y1.min(zone.y1),
+        ));
+    }
     let in_moved = |b: &RectPt| moved_rects.iter().any(|m| m.intersects(b));
     let text = if moved_rects.is_empty() {
         textdiff::diff_text(
@@ -634,6 +726,7 @@ pub fn compare_issues_with(
         .iter()
         .map(|w| format!("A: {w}"))
         .chain(b.warnings.iter().map(|w| format!("B: {w}")))
+        .chain(a.links.iter().filter_map(|l| l.note()))
         .collect();
     let mut done = 0usize;
     let mut finish =
@@ -645,6 +738,13 @@ pub fn compare_issues_with(
                 diff: &d,
             });
             let mut d = d;
+            d.apply_link(a.links.iter().find(|l| l.key == d.key));
+            if let Some(n) = a.notes.get(&d.key).filter(|_| d.b.is_none()) {
+                d.reasons.push(n.clone());
+            }
+            if let Some(n) = b.notes.get(&d.key).filter(|_| d.a.is_none()) {
+                d.reasons.push(n.clone());
+            }
             d.mask = None; // geheugen: grove maskers niet voor de hele set bewaren
             sheets.push(d);
         };
@@ -677,7 +777,7 @@ pub fn compare_issues_with(
                         key: sa.key.clone(),
                         title: sa.title.clone(),
                         verdict: Verdict::NotComparable,
-                        reasons: vec![format!("fout: {e:#}")],
+                        reasons: vec![format!("fout: {}", crate::errors::nl(&e))],
                         a: Some(sa.into()),
                         b: Some(sb.into()),
                         registration: None,
@@ -689,6 +789,8 @@ pub fn compare_issues_with(
                         text: vec![],
                         seconds: 0.0,
                         vector: None,
+                        link: None,
+                        pair_label: String::new(),
                         mask: None,
                     },
                 };
@@ -741,7 +843,8 @@ pub fn compare_issues_with(
     })
 }
 
-fn only(k: &str, s: &SheetRef, v: Verdict, cfg: &Config, in_a: bool) -> SheetDiff {
+/// Regel voor een blad zonder tegenhanger.
+pub fn only(k: &str, s: &SheetRef, v: Verdict, cfg: &Config, in_a: bool) -> SheetDiff {
     SheetDiff {
         key: k.to_string(),
         title: s.title.clone(),
@@ -758,6 +861,8 @@ fn only(k: &str, s: &SheetRef, v: Verdict, cfg: &Config, in_a: bool) -> SheetDif
         text: vec![],
         seconds: 0.0,
         vector: None,
+        link: None,
+        pair_label: String::new(),
         mask: None,
     }
 }
@@ -769,6 +874,7 @@ pub fn compare_pages(
     file_b: &Path,
     page_b: usize,
     cfg: &Config,
+    align: Option<crate::register::ManualAlign>,
 ) -> Result<SheetDiff> {
     let mk = |f: &Path, p: usize| -> Result<SheetRef> {
         let d = Doc::open(f)?;
@@ -788,9 +894,15 @@ pub fn compare_pages(
             text_runs: 0,
             booklets: vec![],
             signature: 0,
+            tokens: Default::default(),
+            ink: None,
+            align: None,
+            file_pages: 0,
         })
     };
-    compare_sheet(&mk(file_a, page_a)?, &mk(file_b, page_b)?, cfg, None)
+    let mut a = mk(file_a, page_a)?;
+    a.align = align;
+    compare_sheet(&a, &mk(file_b, page_b)?, cfg, None)
 }
 
 pub fn mm(pt: f64) -> f64 {

@@ -54,8 +54,16 @@ pub struct Registration {
     /// Verschuiving in mm (na rotatie en schaal), voor weergave.
     pub dx_mm: f64,
     pub dy_mm: f64,
+    /// Rotatie bovenop `rotation` om het midden van B, in graden; alleen handmatig.
+    #[serde(default)]
+    pub free_deg: f64,
     /// Overlap van de inkt, 0..1.
     pub score: f64,
+    /// Deel van de inkt van A dat in B terugkomt, en andersom. Het gemiddelde is `score`.
+    #[serde(default)]
+    pub a_in_b: f64,
+    #[serde(default)]
+    pub b_in_a: f64,
     /// true als de transformatie exact identiteit is (zelfde formaat, geen verschuiving).
     pub identity: bool,
     pub ok: bool,
@@ -67,34 +75,115 @@ impl Registration {
         Registration {
             transform: Affine::IDENTITY,
             rotation: Rot90::R0,
+            free_deg: 0.0,
             scale: 1.0,
             dx_mm: 0.0,
             dy_mm: 0.0,
             score,
+            a_in_b: score,
+            b_in_a: score,
             identity: true,
             ok: true,
             note: "identiteit".into(),
         }
     }
+}
 
-    /// Bouwt een registratie uit handmatige parameters (rotatie om de oorsprong van B,
-    /// schaal, verschuiving in mm).
-    pub fn manual(rot: Rot90, b_size: (f64, f64), scale: f64, dx_mm: f64, dy_mm: f64) -> Self {
+/// Handmatige uitlijning van B op A: hele kwartslagen plus een vrije rest, schaal, verschuiving.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ManualAlign {
+    /// Rotatie in graden met de klok mee, elke waarde.
+    pub rotation_deg: f64,
+    pub scale: f64,
+    pub dx_mm: f64,
+    pub dy_mm: f64,
+}
+
+impl ManualAlign {
+    /// De waarden van een bestaande registratie, als startpunt om bij te stellen.
+    pub fn of(r: &Registration) -> ManualAlign {
+        ManualAlign {
+            rotation_deg: r.rotation.degrees() as f64 + r.free_deg,
+            scale: r.scale,
+            dx_mm: r.dx_mm,
+            dy_mm: r.dy_mm,
+        }
+    }
+
+    /// Leest "rotatie,schaal,dx,dy" (graden, factor, mm, mm).
+    pub fn parse(s: &str) -> Result<ManualAlign> {
+        let v: Vec<f64> = s
+            .split(',')
+            .map(|p| p.trim().parse::<f64>())
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| anyhow::anyhow!("uitlijning '{s}': {e}"))?;
+        anyhow::ensure!(v.len() == 4, "uitlijning verwacht rotatie,schaal,dx,dy");
+        anyhow::ensure!(v[1] > 0.0, "uitlijning: schaal moet groter zijn dan 0");
+        Ok(ManualAlign {
+            rotation_deg: v[0],
+            scale: v[1],
+            dx_mm: v[2],
+            dy_mm: v[3],
+        })
+    }
+
+    /// Bouwt de registratie: kwartslagen, vrije rest om het midden van het gedraaide blad, schaal,
+    /// verschuiving. De overlap vult de vergelijking in; hier is hij nog niet bekend. Geen NaN:
+    /// dat wordt `null` in JSON en de ouder kan de regel van een werker dan niet meer lezen.
+    pub fn registration(&self, b_size: (f64, f64)) -> Registration {
+        let quarters = (self.rotation_deg / 90.0).round();
+        let rot = Rot90::from_degrees(quarters as i64 * 90);
+        let free = self.rotation_deg - quarters * 90.0;
+        let (w, h) = match rot {
+            Rot90::R0 | Rot90::R180 => b_size,
+            _ => (b_size.1, b_size.0),
+        };
         let t = rot
             .affine(b_size.0, b_size.1)
-            .then(&Affine::scale(scale))
-            .then(&Affine::translate(dx_mm / MM_PER_PT, dy_mm / MM_PER_PT));
+            .then(&Affine::rotate_about(free, w / 2.0, h / 2.0))
+            .then(&Affine::scale(self.scale))
+            .then(&Affine::translate(
+                self.dx_mm / MM_PER_PT,
+                self.dy_mm / MM_PER_PT,
+            ));
         Registration {
             transform: t,
             rotation: rot,
-            scale,
-            dx_mm,
-            dy_mm,
-            score: f64::NAN,
-            identity: rot == Rot90::R0 && scale == 1.0 && dx_mm == 0.0 && dy_mm == 0.0,
+            free_deg: free,
+            scale: self.scale,
+            dx_mm: self.dx_mm,
+            dy_mm: self.dy_mm,
+            score: 0.0,
+            a_in_b: 0.0,
+            b_in_a: 0.0,
+            identity: rot == Rot90::R0
+                && free == 0.0
+                && self.scale == 1.0
+                && self.dx_mm == 0.0
+                && self.dy_mm == 0.0,
             ok: true,
-            note: "handmatig".into(),
+            note: format!(
+                "handmatig: rotatie {:.2} gr, schaal {:.4}, verschuiving {:.2} / {:.2} mm",
+                self.rotation_deg, self.scale, self.dx_mm, self.dy_mm
+            ),
         }
+    }
+}
+
+impl Registration {
+    /// Meet de overlap van de inkt onder deze transformatie (handmatige uitlijning).
+    pub fn measure(
+        &mut self,
+        page_a: &PdfPage,
+        size_a: (f64, f64),
+        page_b: &PdfPage,
+        p: &RegParams,
+    ) -> Result<()> {
+        let ga = pdf::render_page_gray(page_a, p.fine_dpi, &Affine::IDENTITY, size_a)?;
+        let gb = pdf::render_page_gray(page_b, p.fine_dpi, &self.transform, size_a)?;
+        (self.a_in_b, self.b_in_a) = overlap_parts(&ga, &gb);
+        self.score = (self.a_in_b + self.b_in_a) / 2.0;
+        Ok(())
     }
 }
 
@@ -203,6 +292,12 @@ fn search_scale_shift(
 
 /// Overlapscore van inkt: gemiddelde van (A-inkt met B-inkt binnen 1 px) en omgekeerd.
 pub fn overlap_score(a: &Gray, b: &Gray) -> f64 {
+    let (x, y) = overlap_parts(a, b);
+    (x + y) / 2.0
+}
+
+/// Deel van de A-inkt met B-inkt binnen 1 px, en andersom.
+pub fn overlap_parts(a: &Gray, b: &Gray) -> (f64, f64) {
     const INK: u8 = 160;
     let amin = crate::raster::min_filter(a, 1);
     let bmin = crate::raster::min_filter(b, 1);
@@ -222,9 +317,9 @@ pub fn overlap_score(a: &Gray, b: &Gray) -> f64 {
         }
     }
     if na == 0 || nb == 0 {
-        return 0.0;
+        return (0.0, 0.0);
     }
-    (ha as f64 / na as f64 + hb as f64 / nb as f64) / 2.0
+    (ha as f64 / na as f64, hb as f64 / nb as f64)
 }
 
 /// Registreert pagina B op pagina A.
@@ -323,17 +418,20 @@ pub fn register(
 
     // --- kwaliteit ---
     let gb = pdf::render_page_gray(page_b, p.fine_dpi, &transform, size_a)?;
-    let mut score = overlap_score(&ga, &gb);
+    let mut parts = overlap_parts(&ga, &gb);
+    let mut score = (parts.0 + parts.1) / 2.0;
     // Bij gelijk formaat wint identiteit als die (vrijwel) even goed past: veel gewijzigde
     // inhoud kan de profielen een fractie verschuiven zonder dat het blad verschoven is.
     if !is_identity && rot == Rot90::R0 && same_size {
         let gi = pdf::render_page_gray(page_b, p.fine_dpi, &Affine::IDENTITY, size_a)?;
-        let si = overlap_score(&ga, &gi);
+        let pi = overlap_parts(&ga, &gi);
+        let si = (pi.0 + pi.1) / 2.0;
         tracing::debug!(score, si, "identiteit vs gevonden transformatie");
         if si >= score - p.identity_margin {
             is_identity = true;
             transform = Affine::IDENTITY;
             score = si;
+            parts = pi;
         }
     }
     let scale = transform.scale_factor();
@@ -347,9 +445,11 @@ pub fn register(
     let ok = score >= p.min_score;
     let note = if !ok {
         format!(
-            "UITLIJNING MISLUKT: overlap {:.1} % < {:.0} %. Vergelijking op dit blad is niet betrouwbaar.",
+            "UITLIJNING MISLUKT: overlap {:.1} % < {:.0} % ({:.0} % van A komt terug in B, {:.0} % van B in A). Vergelijking op dit blad is niet betrouwbaar. Is het toch hetzelfde blad, maar echt anders ingedeeld: lijn het handmatig uit.",
             score * 100.0,
-            p.min_score * 100.0
+            p.min_score * 100.0,
+            parts.0 * 100.0,
+            parts.1 * 100.0
         )
     } else if is_identity {
         "identiteit (zelfde formaat, geen verschuiving)".into()
@@ -365,10 +465,13 @@ pub fn register(
     Ok(Registration {
         transform,
         rotation: rot,
+        free_deg: 0.0,
         scale,
         dx_mm: ox,
         dy_mm: oy,
         score,
+        a_in_b: parts.0,
+        b_in_a: parts.1,
         identity: is_identity,
         ok,
         note,
@@ -378,6 +481,45 @@ pub fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_align_round_trips_and_stays_valid_json() {
+        let m = ManualAlign {
+            rotation_deg: 93.5,
+            scale: 1.01,
+            dx_mm: 2.0,
+            dy_mm: -3.0,
+        };
+        let r = m.registration((1000.0, 700.0));
+        assert_eq!(r.rotation, Rot90::R90);
+        assert!((r.free_deg - 3.5).abs() < 1e-9);
+        assert_eq!(ManualAlign::of(&r), m);
+        let back: Registration = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back.note, r.note);
+    }
+
+    #[test]
+    fn free_rotation_turns_around_the_middle_of_the_sheet() {
+        let m = ManualAlign {
+            rotation_deg: 10.0,
+            scale: 1.0,
+            dx_mm: 0.0,
+            dy_mm: 0.0,
+        };
+        let t = m.registration((200.0, 100.0)).transform;
+        let (x, y) = t.apply(100.0, 50.0);
+        assert!((x - 100.0).abs() < 1e-9 && (y - 50.0).abs() < 1e-9);
+        // met de klok mee in weergave: rechts van het midden gaat omlaag (y groter)
+        assert!(t.apply(200.0, 50.0).1 > 50.0);
+    }
+
+    #[test]
+    fn nothing_turned_is_the_identity() {
+        let m = ManualAlign::parse("0, 1, 0, 0").unwrap();
+        assert!(m.registration((10.0, 10.0)).identity);
+        assert!(ManualAlign::parse("1,2").is_err());
+        assert!(ManualAlign::parse("0,0,0,0").is_err());
+    }
 
     #[test]
     fn profile_shift_and_scale_recovered() {

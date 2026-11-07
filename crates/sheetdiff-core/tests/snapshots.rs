@@ -20,11 +20,13 @@ fn sheet(key: &str, verdict: Verdict) -> SheetDiff {
             file: PathBuf::from("A/boekje.pdf"),
             page: 0,
             booklets: vec!["gevels".into()],
+            file_pages: 1,
         }),
         b: Some(SheetLoc {
             file: PathBuf::from("B/boekje.pdf"),
             page: 0,
             booklets: vec!["gevels".into()],
+            file_pages: 1,
         }),
         registration: Some(Registration::identity_with_score(1.0)),
         dpi: 300.0,
@@ -35,6 +37,8 @@ fn sheet(key: &str, verdict: Verdict) -> SheetDiff {
         text: vec![],
         seconds: 1.0,
         vector: None,
+        link: None,
+        pair_label: "op naam".into(),
         mask: None,
     }
 }

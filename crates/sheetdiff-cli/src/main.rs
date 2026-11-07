@@ -3,8 +3,10 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use sheetdiff_core::choices::Choices;
 use sheetdiff_core::compare::{self, Progress};
-use sheetdiff_core::{issue, report, Config};
+use sheetdiff_core::register::ManualAlign;
+use sheetdiff_core::{issue, pairing, report, Config};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -19,6 +21,84 @@ struct Cli {
     profile: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// Handmatige keuzes uit de app. Standaard `<B> vs <A>.sheetdiff.json` bij uitgifte B.
+#[derive(clap::Args)]
+struct ChoicesArgs {
+    /// Keuzebestand met handmatige koppelingen, ontkoppelingen en uitlijningen
+    #[arg(long, visible_alias = "align-file")]
+    choices: Option<PathBuf>,
+    /// Bewaarde keuzes negeren
+    #[arg(long, conflicts_with = "choices")]
+    no_choices: bool,
+}
+
+impl ChoicesArgs {
+    fn load(&self, a: &std::path::Path, b: &std::path::Path) -> Result<Choices> {
+        if self.no_choices {
+            return Ok(Choices::new(a, b));
+        }
+        let path = match &self.choices {
+            Some(p) => {
+                anyhow::ensure!(p.exists(), "keuzebestand bestaat niet: {}", p.display());
+                p.clone()
+            }
+            None => Choices::default_path(a, b),
+        };
+        let (c, warn) = Choices::load(&path, a, b)?;
+        if let Some(w) = warn {
+            eprintln!("! {w}");
+        }
+        if !c.is_empty() {
+            eprintln!(
+                "keuzes: {} ({} koppelingen, {} ontkoppelingen, {} uitlijningen)",
+                path.display(),
+                c.links.len(),
+                c.unlinks.len(),
+                c.aligns.len()
+            );
+        }
+        Ok(c)
+    }
+}
+
+/// Handmatige uitlijning van twee losse pagina's.
+#[derive(clap::Args)]
+struct AlignArgs {
+    /// rotatie,schaal,dx,dy (graden, factor, mm, mm); negatieve waarden met = (--align=-1,1,0,0)
+    #[arg(long)]
+    align: Option<String>,
+    /// Keuzebestand; de uitlijning van dit bestand en deze pagina's geldt
+    #[arg(long, conflicts_with = "align")]
+    align_file: Option<PathBuf>,
+}
+
+impl AlignArgs {
+    /// Pagina's 1-based.
+    fn load(
+        &self,
+        a: &std::path::Path,
+        page_a: usize,
+        b: &std::path::Path,
+        page_b: usize,
+    ) -> Result<Option<ManualAlign>> {
+        if let Some(s) = &self.align {
+            return Ok(Some(ManualAlign::parse(s)?));
+        }
+        let Some(f) = &self.align_file else {
+            return Ok(None);
+        };
+        anyhow::ensure!(f.exists(), "keuzebestand bestaat niet: {}", f.display());
+        let (c, _) = Choices::load(f, a, b)?;
+        let m = c.align_for(a, page_a, b, page_b);
+        anyhow::ensure!(
+            m.is_some(),
+            "geen uitlijning voor deze pagina's in {}",
+            f.display()
+        );
+        Ok(m)
+    }
 }
 
 #[derive(Subcommand)]
@@ -52,6 +132,29 @@ enum Cmd {
         /// Aantal werkerprocessen (0 = in dit proces)
         #[arg(long)]
         workers: Option<usize>,
+        /// Pagina i van A tegen pagina i van B, namen genegeerd
+        #[arg(long)]
+        pair_by_order: bool,
+        #[command(flatten)]
+        choices: ChoicesArgs,
+    },
+    /// Toon hoe bladen gekoppeld worden, met alle inhoudsscores (kalibratie)
+    Pairs {
+        a: PathBuf,
+        b: PathBuf,
+        /// Alle scores als CSV: blad_a;blad_b;lijnen;tekst;score
+        #[arg(long)]
+        csv: Option<PathBuf>,
+        /// Tekeningnummers negeren: alles op inhoud (blinde toets)
+        #[arg(long)]
+        no_names: bool,
+        /// Eindkoppeling als lijst: sleutel, blad A, blad B
+        #[arg(long)]
+        list: Option<PathBuf>,
+        #[arg(long)]
+        workers: Option<usize>,
+        #[command(flatten)]
+        choices: ChoicesArgs,
     },
     /// Vergelijk twee losse pagina's (1-based paginanummers)
     Page {
@@ -61,6 +164,8 @@ enum Cmd {
         page_b: usize,
         #[arg(long)]
         dpi: Option<f64>,
+        #[command(flatten)]
+        align: AlignArgs,
     },
     /// Overlay-PNG van twee pagina's (1-based), optioneel uitsnede in mm
     Overlay {
@@ -78,6 +183,8 @@ enum Cmd {
         /// diff | a | b | blend
         #[arg(long, default_value = "diff")]
         mode: String,
+        #[command(flatten)]
+        align: AlignArgs,
     },
     /// Vectorvergelijking (spike) van twee pagina's (1-based)
     Vec {
@@ -103,6 +210,8 @@ enum Cmd {
         /// Map voor PDF-kopieen van B met de opmerkingen en status erop
         #[arg(long)]
         pdf_dir: Option<PathBuf>,
+        #[command(flatten)]
+        choices: ChoicesArgs,
     },
     /// Intern: werkerproces voor parallel vergelijken
     #[command(hide = true)]
@@ -119,9 +228,17 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("FOUT: {e:#}");
+            eprintln!("FOUT: {}", sheetdiff_core::errors::nl(&e));
             std::process::exit(2);
         }
+    }
+}
+
+/// Werkerprocessen van deze exe; 0 = in dit proces.
+fn runner(exe: &std::path::Path, workers: Option<usize>) -> compare::Runner<'_> {
+    match workers.unwrap_or_else(sheetdiff_core::parallel::default_workers) {
+        0 => compare::Runner::InProcess,
+        workers => compare::Runner::Processes { exe, workers },
     }
 }
 
@@ -141,6 +258,7 @@ fn run() -> Result<i32> {
             crop,
             out,
             mode,
+            align,
         } => {
             use sheetdiff_core::geom::{Affine, PT_PER_MM};
             use sheetdiff_core::overlay::{self, OverlayColors, ViewMode};
@@ -150,7 +268,14 @@ fn run() -> Result<i32> {
             let pa = da.page(page_a - 1)?;
             let pb = db.page(page_b - 1)?;
             let (ga, gb) = (pdf::page_geom(&pa)?, pdf::page_geom(&pb)?);
-            let reg = sheetdiff_core::register::register(&pa, &ga, &pb, &gb, &cfg.register)?;
+            let reg = match align.load(&a, page_a, &b, page_b)? {
+                Some(m) => {
+                    let mut r = m.registration(gb.display_size());
+                    r.measure(&pa, ga.display_size(), &pb, &cfg.register)?;
+                    r
+                }
+                None => sheetdiff_core::register::register(&pa, &ga, &pb, &gb, &cfg.register)?,
+            };
             eprintln!("uitlijning: {} (overlap {:.3})", reg.note, reg.score);
             let (w_pt, h_pt) = ga.display_size();
             let (x0, y0, x1, y1) = match crop {
@@ -259,10 +384,15 @@ B {:?}",
             xlsx,
             csv,
             pdf_dir,
+            choices,
         } => {
             use sheetdiff_core::comments;
-            let ia = issue::scan_issue(&a, &cfg)?;
-            let ib = issue::scan_issue(&b, &cfg)?;
+            let choices = choices.load(&a, &b)?;
+            let exe = std::env::current_exe()?;
+            let run = runner(&exe, None);
+            let mut ia = issue::scan_issue_with(&a, &cfg, &run)?;
+            let mut ib = issue::scan_issue_with(&b, &cfg, &run)?;
+            pairing::pair_with_choices(&mut ia, &mut ib, &cfg, &run, &choices, false)?;
             let t = std::time::Instant::now();
             let r = comments::analyze(&c, &ia, &ib, &cfg)?;
             for (p, (nr, reg)) in &r.page_regs {
@@ -331,7 +461,90 @@ B {:?}",
             Ok(0)
         }
         Cmd::Worker { job } => {
-            sheetdiff_core::parallel::run_job(&job, std::io::stdout().lock())?;
+            sheetdiff_core::parallel::run_job(
+                &job,
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+            )?;
+            Ok(0)
+        }
+        Cmd::Pairs {
+            a,
+            b,
+            csv,
+            no_names,
+            list,
+            workers,
+            choices,
+        } => {
+            if no_names {
+                cfg.pair.use_names = false;
+            }
+            let choices = choices.load(&a, &b)?;
+            let exe = std::env::current_exe()?;
+            let runner = runner(&exe, workers);
+            let t0 = std::time::Instant::now();
+            let (mut ia, mut ib) = (
+                issue::scan_issue_with(&a, &cfg, &runner)?,
+                issue::scan_issue_with(&b, &cfg, &runner)?,
+            );
+            let t_scan = t0.elapsed().as_secs_f64();
+            let t1 = std::time::Instant::now();
+            let m = pairing::score_matrix(&mut ia, &mut ib, &cfg, &runner)?;
+            let t_inks = t1.elapsed().as_secs_f64();
+            let t2 = std::time::Instant::now();
+            pairing::pair_with_choices(&mut ia, &mut ib, &cfg, &runner, &choices, false)?;
+            eprintln!(
+                "{} x {} bladen: scan {t_scan:.1} s, inktkaarten + scores {t_inks:.1} s, scores + toewijzing {:.2} s",
+                m.keys_a.len(),
+                m.keys_b.len(),
+                t2.elapsed().as_secs_f64()
+            );
+            if let Some(p) = csv {
+                let f = |v: Option<f64>| v.map(|x| format!("{x:.4}")).unwrap_or_default();
+                let mut s = String::from("blad_a;blad_b;lijnen;tekst;score\n");
+                for (i, ka) in m.keys_a.iter().enumerate() {
+                    for (j, kb) in m.keys_b.iter().enumerate() {
+                        let c = &m.scores[i][j];
+                        s.push_str(&format!(
+                            "{ka};{kb};{};{};{:.4}\n",
+                            f(c.lines),
+                            f(c.text),
+                            c.score
+                        ));
+                    }
+                }
+                std::fs::write(p, s)?;
+            }
+            for l in &ia.links {
+                println!("{}\t{}\t{}", l.label(), l.key_a, l.key_b);
+            }
+            for (k, n) in ia.notes.iter().chain(ib.notes.iter()) {
+                println!("los\t{k}\t{n}");
+            }
+            if let Some(p) = list {
+                let loc = |s: &issue::SheetRef| {
+                    let stem = s.file.file_stem().unwrap_or_default().to_string_lossy();
+                    format!("{stem}#{}", s.page + 1)
+                };
+                let mut s = String::new();
+                for (k, sa) in &ia.sheets {
+                    if let Some(sb) = ib.sheets.get(k) {
+                        s.push_str(&format!("{k}\t{}\t{}\n", loc(sa), loc(sb)));
+                    }
+                }
+                std::fs::write(p, s)?;
+            }
+            let same = ia
+                .sheets
+                .keys()
+                .filter(|k| ib.sheets.contains_key(*k))
+                .count();
+            println!(
+                "{same} paren, {} alleen in A, {} alleen in B",
+                ia.sheets.len() - same,
+                ib.sheets.len() - same
+            );
             Ok(0)
         }
         Cmd::Profile => {
@@ -369,16 +582,21 @@ B {:?}",
             b,
             page_b,
             dpi,
+            align,
         } => {
             if let Some(d) = dpi {
                 cfg.compare.dpi = d;
             }
-            let d = compare::compare_pages(&a, page_a - 1, &b, page_b - 1, &cfg)?;
+            let m = align.load(&a, page_a, &b, page_b)?;
+            let d = compare::compare_pages(&a, page_a - 1, &b, page_b - 1, &cfg, m)?;
             let mut s = String::new();
             report::sheet_markdown(&d, &mut s);
             print!("{s}");
             if let Some(r) = &d.registration {
-                println!("uitlijning: {} (overlap {:.3})", r.note, r.score);
+                println!(
+                    "uitlijning: {} (overlap {:.3}; A in B {:.3}, B in A {:.3})",
+                    r.note, r.score, r.a_in_b, r.b_in_a
+                );
             }
             for r in &d.regions {
                 println!(
@@ -410,27 +628,43 @@ B {:?}",
             xlsx,
             clouds,
             workers,
+            pair_by_order,
+            choices,
         } => {
             if let Some(d) = dpi {
                 cfg.compare.dpi = d;
             }
-            let mut ia = issue::scan_issue(&a, &cfg)?;
-            let mut ib = issue::scan_issue(&b, &cfg)?;
+            let choices = choices.load(&a, &b)?;
+            let exe = std::env::current_exe()?;
+            let nw = workers.unwrap_or_else(sheetdiff_core::parallel::default_workers);
+            let runner = runner(&exe, Some(nw));
+            let (mut ia, mut ib) = if pair_by_order {
+                let (mut ia, mut ib) = (
+                    issue::scan_pages_with(&a, &cfg, &runner)?,
+                    issue::scan_pages_with(&b, &cfg, &runner)?,
+                );
+                pairing::pair_with_choices(&mut ia, &mut ib, &cfg, &runner, &choices, true)?;
+                (ia, ib)
+            } else {
+                let (mut ia, mut ib) = (
+                    issue::scan_issue_with(&a, &cfg, &runner)?,
+                    issue::scan_issue_with(&b, &cfg, &runner)?,
+                );
+                let t = std::time::Instant::now();
+                let r =
+                    pairing::pair_with_choices(&mut ia, &mut ib, &cfg, &runner, &choices, false)?;
+                eprintln!(
+                    "{} bladen op inhoud gekoppeld in {:.1} s",
+                    ia.links.len() - r.links,
+                    t.elapsed().as_secs_f64()
+                );
+                (ia, ib)
+            };
             if let Some(o) = only {
                 let keep: Vec<&str> = o.split(',').map(|s| s.trim()).collect();
                 ia.sheets.retain(|k, _| keep.contains(&k.as_str()));
                 ib.sheets.retain(|k, _| keep.contains(&k.as_str()));
             }
-            let exe = std::env::current_exe()?;
-            let nw = workers.unwrap_or_else(sheetdiff_core::parallel::default_workers);
-            let runner = if nw == 0 {
-                compare::Runner::InProcess
-            } else {
-                compare::Runner::Processes {
-                    exe: &exe,
-                    workers: nw,
-                }
-            };
             let t0 = std::time::Instant::now();
             let d = compare::compare_issues_with(&ia, &ib, &cfg, runner, |p| match p {
                 Progress::Start { total } => eprintln!("{total} bladen vergelijken..."),

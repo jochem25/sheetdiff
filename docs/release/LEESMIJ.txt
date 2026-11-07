@@ -19,7 +19,9 @@ SHEETDIFF_PDFIUM=<map>.
 Viewer
 ------
 1. Kies uitgifte A (oud) en B (nieuw): een map of een PDF-boekje.
-2. Bladen worden gekoppeld op tekeningnummer. Per blad: overlay, knipperen,
+2. Bladen worden gekoppeld op tekeningnummer, daarna op inhoud (lijnwerk en
+   tekst); twijfelgevallen staan oranje in de lijst. Of kies 'Vergelijk op
+   paginavolgorde'. Per blad: overlay, knipperen,
    naast elkaar, pixel- en vectorweergave. Inzoomen tot 1:1-pixel (300 dpi).
 3. Optioneel: opmerkingen-PDF van de aannemer erbij. Per opmerking een voorstel;
    de status zet u zelf. Export naar xlsx/csv en een PDF-kopie van B met de

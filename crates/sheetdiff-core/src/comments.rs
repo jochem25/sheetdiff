@@ -8,7 +8,7 @@
 //! (b) rood ingetekend in de inhoud zelf - gevonden als rode inkt in de opmerkingen-PDF die op
 //!     dezelfde plek in A niet staat.
 
-use crate::config::Config;
+use crate::config::{CommentsCfg, Config};
 use crate::geom::{Affine, PageGeom, RectPt, MM_PER_PT, PT_PER_MM};
 use crate::identify::Identifier;
 use crate::issue::{Issue, SheetRef};
@@ -62,6 +62,8 @@ pub enum Proposal {
     LikelyDone,
     NotDone,
     Unclear,
+    /// Op de plek zelf niets, maar elders op het blad een nieuwe tekst die erover gaat.
+    Elsewhere,
     Info,
 }
 
@@ -71,6 +73,7 @@ impl Proposal {
             Proposal::LikelyDone => "waarschijnlijk verwerkt",
             Proposal::NotDone => "niet verwerkt",
             Proposal::Unclear => "onduidelijk",
+            Proposal::Elsewhere => "verwerkt elders (controleer)",
             Proposal::Info => "informatief",
         }
     }
@@ -102,6 +105,9 @@ pub struct Comment {
     pub diff_px: u64,
     /// Tekstwijzigingen A->B in de zone, als "oud -> nieuw".
     pub text_changes: Vec<String>,
+    /// Bij 'verwerkt elders': plek op A van de tekst die erover gaat.
+    #[serde(default)]
+    pub elsewhere: Option<RectPt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +280,7 @@ pub fn group(annots: &[RawAnnot], cfg: &Config) -> Vec<Comment> {
         reason: String::new(),
         diff_px: 0,
         text_changes: Vec::new(),
+        elsewhere: None,
     };
     // 1. tekstdragers
     for (i, a) in annots.iter().enumerate() {
@@ -543,6 +550,70 @@ fn ensure(docs: &mut BTreeMap<PathBuf, Doc>, f: &Path) -> Result<()> {
 }
 
 /// Volledige analyse van een opmerkingen-PDF tegen uitgifte A en B.
+/// Woorden van een opmerking die iets zeggen over het onderwerp, in kleine letters.
+fn topic_words(text: &str, p: &CommentsCfg) -> Vec<String> {
+    let mut v: Vec<String> = text
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= p.elsewhere_min_len)
+        .filter(|w| w.chars().any(char::is_alphabetic))
+        .filter(|w| !p.elsewhere_stop_words.iter().any(|s| s == w))
+        .map(String::from)
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Zoekt buiten de zone een nieuwe of gewijzigde tekst die over de opmerking gaat: genoeg woorden
+/// uit de opmerking, of een woord dat een plek aanwijst (renvooi, legenda). De beste treffer wint.
+/// Dit is een voorstel om te controleren, geen bewijs: de tekst kan toevallig dezelfde woorden
+/// bevatten.
+fn find_elsewhere(
+    text: &str,
+    changes: &[crate::textdiff::TextChange],
+    zone: &RectPt,
+    p: &CommentsCfg,
+) -> Option<(String, RectPt)> {
+    let words = topic_words(text, p);
+    if words.is_empty() {
+        return None;
+    }
+    let need = p.elsewhere_min_words.min(words.len()).max(1);
+    changes
+        .iter()
+        .filter(|t| matches!(t.kind, TextChangeKind::Added | TextChangeKind::Changed))
+        .filter(|t| !t.bbox.intersects(zone))
+        .filter_map(|t| {
+            let new = t.new.as_ref()?;
+            let low = new.to_lowercase();
+            let hits: Vec<&String> = words.iter().filter(|w| low.contains(w.as_str())).collect();
+            let place = hits.iter().any(|w| p.elsewhere_place_words.contains(*w));
+            (hits.len() >= need || place).then(|| (hits.len(), new.clone(), t.bbox))
+        })
+        .max_by_key(|h| h.0)
+        .map(|(_, new, bbox)| (new, bbox))
+}
+
+/// Blad van A met dit nummer. Op sleutel, anders via de koppeling (het blad heeft dan de sleutel
+/// van B), anders het enige blad met dit nummer (losgekoppeld: sleutel met achtervoegsel).
+pub(crate) fn sheet_of_number<'a>(a: &'a Issue, nr: &str) -> Option<&'a SheetRef> {
+    if let Some(s) = a.sheets.get(nr) {
+        return Some(s);
+    }
+    if let Some(l) = a.links.iter().find(|l| l.key_a == nr) {
+        return a.sheets.get(&l.key);
+    }
+    let mut same = a
+        .sheets
+        .values()
+        .filter(|s| s.number.as_deref() == Some(nr));
+    match (same.next(), same.next()) {
+        (Some(s), None) => Some(s),
+        _ => None,
+    }
+}
+
 pub fn analyze(c_file: &Path, a: &Issue, b: &Issue, cfg: &Config) -> Result<CommentsResult> {
     let ident = Identifier::new(&cfg.identify)?;
     let norm = Normalizer::new(&cfg.normalize.stamp_patterns)?;
@@ -579,13 +650,15 @@ pub fn analyze(c_file: &Path, a: &Issue, b: &Issue, cfg: &Config) -> Result<Comm
             }
             continue;
         };
-        let Some(sa) = a.sheets.get(nr) else {
+        let Some(sa) = sheet_of_number(a, nr) else {
             warnings.push(format!(
                 "opmerkingenpagina {} ({nr}): blad niet in uitgifte A",
                 p + 1
             ));
             continue;
         };
+        // na koppelen kan de sleutel anders zijn dan het nummer op de opmerkingenpagina
+        let nr = &sa.key;
         ensure(&mut docs, &sa.file)?;
         let da = &docs[&sa.file];
         let pa = da.page(sa.page)?;
@@ -647,6 +720,7 @@ pub fn analyze(c_file: &Path, a: &Issue, b: &Issue, cfg: &Config) -> Result<Comm
                         reason: String::new(),
                         diff_px: 0,
                         text_changes: vec![],
+                        elsewhere: None,
                     });
                 }
             }
@@ -692,7 +766,10 @@ pub fn analyze(c_file: &Path, a: &Issue, b: &Issue, cfg: &Config) -> Result<Comm
         if !b_regs.contains_key(nr) {
             b_regs.insert(
                 nr.clone(),
-                register::register(&pa, &sa.geom, &pb, &sb.geom, &cfg.register)?,
+                match sa.align {
+                    Some(m) => m.registration(sb.geom.display_size()),
+                    None => register::register(&pa, &sa.geom, &pb, &sb.geom, &cfg.register)?,
+                },
             );
         }
         let regb = &b_regs[nr];
@@ -768,6 +845,20 @@ pub fn analyze(c_file: &Path, a: &Issue, b: &Issue, cfg: &Config) -> Result<Comm
         if c.kind == CommentKind::Label && c.proposal == Proposal::NotDone {
             c.proposal = Proposal::Unclear;
             c.reason = "verwijzingsnummer (zie lijst elders); geen verschil op deze plek".into();
+        }
+        if matches!(c.proposal, Proposal::NotDone | Proposal::Unclear) {
+            if let Some((text, place)) =
+                find_elsewhere(&c.text, &text_by_sheet[nr], &z, &cfg.comments)
+            {
+                c.reason = format!(
+                    "op de plek zelf {} px verschil; nieuwe tekst elders op dit blad: '{text}' bij {:.0}, {:.0} mm",
+                    c.diff_px,
+                    mm(place.x0),
+                    mm(place.y0)
+                );
+                c.proposal = Proposal::Elsewhere;
+                c.elsewhere = Some(place);
+            }
         }
     }
     comments.sort_by(|x, y| {
@@ -901,6 +992,50 @@ pub fn mm(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn change(kind: TextChangeKind, new: &str, x: f64) -> crate::textdiff::TextChange {
+        crate::textdiff::TextChange {
+            kind,
+            old: None,
+            new: Some(new.into()),
+            bbox: RectPt::new(x, 100.0, x + 50.0, 110.0),
+            moved_mm: None,
+        }
+    }
+
+    #[test]
+    fn a_new_text_in_the_legend_counts_as_elsewhere() {
+        let p = CommentsCfg::default();
+        let z = RectPt::new(0.0, 0.0, 200.0, 200.0);
+        let t = vec![
+            change(TextChangeKind::Added, "Peil vloer", 900.0),
+            change(TextChangeKind::Added, "Renvooi Glas", 1000.0),
+        ];
+        let r = find_elsewhere("tekst opnemen in algemeen renvooi", &t, &z, &p).unwrap();
+        assert_eq!(r.0, "Renvooi Glas");
+    }
+
+    #[test]
+    fn two_topic_words_are_enough_and_one_is_not() {
+        let p = CommentsCfg::default();
+        let z = RectPt::new(0.0, 0.0, 200.0, 200.0);
+        let t = vec![change(TextChangeKind::Added, "G-waarde glas = 0,4", 900.0)];
+        assert!(find_elsewhere("g-waarde van het glas opgeven", &t, &z, &p).is_some());
+        assert!(find_elsewhere("glas vervangen door paneel", &t, &z, &p).is_none());
+    }
+
+    #[test]
+    fn text_in_the_zone_or_removed_text_does_not_count() {
+        let p = CommentsCfg::default();
+        let z = RectPt::new(0.0, 0.0, 200.0, 200.0);
+        let inside = vec![change(TextChangeKind::Added, "Renvooi Glas", 10.0)];
+        assert!(find_elsewhere("renvooi aanvullen", &inside, &z, &p).is_none());
+        let gone = vec![change(TextChangeKind::Removed, "Renvooi Glas", 900.0)];
+        assert!(find_elsewhere("renvooi aanvullen", &gone, &z, &p).is_none());
+        // alleen stopwoorden: niets om op te zoeken
+        let t = vec![change(TextChangeKind::Added, "tekst toevoegen", 900.0)];
+        assert!(find_elsewhere("tekst toevoegen", &t, &z, &p).is_none());
+    }
 
     fn ann(
         page: usize,

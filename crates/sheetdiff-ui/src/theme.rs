@@ -62,6 +62,16 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 /// Chip-kleuren (achtergrond, tekst) per oordeel.
+/// Chipkleuren per koppeling: twijfel valt op, de rest blijft rustig.
+pub fn link_colors(link: Option<sheetdiff_core::issue::LinkMethod>) -> (Color32, Color32) {
+    use sheetdiff_core::issue::LinkMethod::*;
+    match link {
+        Some(Doubt) => (OKER, Color32::WHITE),
+        Some(Content | Order | Manual) => (Color32::from_rgb(0xF6, 0xEF, 0xDF), OKER),
+        None => (VLAK, GRIJS),
+    }
+}
+
 pub fn verdict_colors(v: sheetdiff_core::compare::Verdict) -> (Color32, Color32) {
     use sheetdiff_core::compare::Verdict::*;
     match v {
@@ -82,7 +92,7 @@ pub fn proposal_colors(p: sheetdiff_core::comments::Proposal) -> (Color32, Color
     match p {
         LikelyDone => (Color32::from_rgb(0xE8, 0xF6, 0xF3), PETROL),
         NotDone => (Color32::from_rgb(0xFC, 0xE9, 0xE7), ROOD),
-        Unclear => (Color32::from_rgb(0xF6, 0xEF, 0xDF), OKER),
+        Unclear | Elsewhere => (Color32::from_rgb(0xF6, 0xEF, 0xDF), OKER),
         Info => (VLAK, GRIJS),
     }
 }

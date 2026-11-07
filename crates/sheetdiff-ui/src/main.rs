@@ -13,6 +13,7 @@ fn main() -> eframe::Result {
         let code = match args.get(2) {
             Some(job) => match sheetdiff_core::parallel::run_job(
                 std::path::Path::new(job),
+                std::io::stdin().lock(),
                 std::io::stdout().lock(),
             ) {
                 Ok(()) => 0,
@@ -22,7 +23,7 @@ fn main() -> eframe::Result {
         };
         std::process::exit(code);
     }
-    let icon = image::load_from_memory(include_bytes!("../assets/icon-256.png"))
+    let icon = image::load_from_memory(include_bytes!("../../../assets/icon/sheetdiff_256.png"))
         .map(|i| i.to_rgba8())
         .ok()
         .map(|i| eframe::egui::IconData {
